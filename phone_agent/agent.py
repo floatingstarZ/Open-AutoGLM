@@ -2,6 +2,8 @@
 
 import json
 import traceback
+import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -11,6 +13,7 @@ from phone_agent.config import get_messages, get_system_prompt
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.model.client import MessageBuilder
+from phone_agent.trace_logger import TraceLogger, get_trace_logger
 
 
 @dataclass
@@ -22,6 +25,8 @@ class AgentConfig:
     lang: str = "cn"
     system_prompt: str | None = None
     verbose: bool = True
+    enable_trace_logging: bool = True
+    trace_root: str | None = None
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -78,8 +83,14 @@ class PhoneAgent:
             takeover_callback=takeover_callback,
         )
 
+        # Initialize trace logger if enabled
+        self.trace_logger: TraceLogger | None = None
+        if self.agent_config.enable_trace_logging:
+            self.trace_logger = get_trace_logger(self.agent_config.trace_root)
+
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
+        self._current_task_id: str | None = None
 
     def run(self, task: str) -> str:
         """
@@ -94,20 +105,47 @@ class PhoneAgent:
         self._context = []
         self._step_count = 0
 
-        # First step with user prompt
-        result = self._execute_step(task, is_first=True)
+        # Start trace logging
+        if self.trace_logger:
+            self._current_task_id = f"task_{uuid.uuid4().hex[:8]}"
+            self.trace_logger.start_task(self._current_task_id, task)
+            if self.agent_config.verbose:
+                print(f"\n📝 Trace logging enabled")
+                print(f"   Task ID: {self._current_task_id}")
+                print(f"   Trace directory: {self.trace_logger.task_dir.absolute()}\n")
 
-        if result.finished:
-            return result.message or "Task completed"
-
-        # Continue until finished or max steps reached
-        while self._step_count < self.agent_config.max_steps:
-            result = self._execute_step(is_first=False)
+        try:
+            # First step with user prompt
+            result = self._execute_step(task, is_first=True)
 
             if result.finished:
-                return result.message or "Task completed"
+                final_message = result.message or "Task completed"
+                if self.trace_logger:
+                    self.trace_logger.reset()
+                return final_message
 
-        return "Max steps reached"
+            # Continue until finished or max steps reached
+            while self._step_count < self.agent_config.max_steps:
+                result = self._execute_step(is_first=False)
+
+                if result.finished:
+                    final_message = result.message or "Task completed"
+                    if self.trace_logger:
+                        self.trace_logger.reset()
+                    return final_message
+
+            # Max steps reached
+            if self.trace_logger:
+                self.trace_logger.reset()
+                if self.agent_config.verbose:
+                    print(f"\n📊 Trace saved: {self.trace_logger.task_dir.absolute()}")
+            return "Max steps reached"
+
+        except Exception as e:
+            # Reset trace logger on error
+            if self.trace_logger:
+                self.trace_logger.reset()
+            raise
 
     def step(self, task: str | None = None) -> StepResult:
         """
@@ -132,6 +170,7 @@ class PhoneAgent:
         """Reset the agent state for a new task."""
         self._context = []
         self._step_count = 0
+        self._current_task_id = None
 
     def _execute_step(
         self, user_prompt: str | None = None, is_first: bool = False
@@ -202,6 +241,7 @@ class PhoneAgent:
             print("=" * 50 + "\n")
 
         # Remove image from context to save space
+        raw_model_input = deepcopy(self._context)
         self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
 
         # Execute action
@@ -222,6 +262,23 @@ class PhoneAgent:
                 f"<think>{response.thinking}</think><answer>{response.action}</answer>"
             )
         )
+        format_model_output = deepcopy(self._context[-1])
+
+        # Log this step
+        if self.trace_logger and self._current_task_id:
+            self.trace_logger.log_step(
+                screenshot_base64=screenshot.base64_data,
+                model_input=self._context[:-1],  # Context before assistant response
+                model_output=response.action,
+                thinking=response.thinking,
+                action=action,
+                current_app=current_app,
+                screen_width=screenshot.width,
+                screen_height=screenshot.height,
+                raw_model_input=raw_model_input,
+                raw_model_output=response.raw_content,
+                format_model_output=format_model_output,
+            )
 
         # Check if finished
         finished = action.get("_metadata") == "finish" or result.should_finish
@@ -233,6 +290,10 @@ class PhoneAgent:
                 f"✅ {msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}"
             )
             print("=" * 50 + "\n")
+
+            # Show trace location if logging is enabled
+            if self.trace_logger and self._current_task_id:
+                print(f"📊 Trace saved: {self.trace_logger.task_dir.absolute()}")
 
         return StepResult(
             success=result.success,
