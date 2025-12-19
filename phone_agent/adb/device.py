@@ -27,9 +27,11 @@ def get_current_app(device_id: str | None = None) -> str:
     output = result.stdout
     if not output:
         raise ValueError("No output from dumpsys window")
+    # print('output in get_current_app:', output)
 
     # Parse window focus info
     for line in output.split("\n"):
+        # print('line in get_current_app:', line)
         if "mCurrentFocus" in line or "mFocusedApp" in line:
             for app_name, package in APP_PACKAGES.items():
                 if package in line:

@@ -410,6 +410,19 @@ Examples:
     )
 
     parser.add_argument(
+        "--disable-trace",
+        action="store_true",
+        help="Disable trace logging (enabled by default)",
+    )
+
+    parser.add_argument(
+        "--trace-root",
+        type=str,
+        default=os.getenv("PHONE_AGENT_TRACE_ROOT", "./traces"),
+        help="Directory to save trace logs (default: ./traces)",
+    )
+
+    parser.add_argument(
         "task",
         nargs="?",
         type=str,
@@ -542,6 +555,8 @@ def main():
         device_id=args.device_id,
         verbose=not args.quiet,
         lang=args.lang,
+        enable_trace_logging=not args.disable_trace,
+        trace_root=args.trace_root,
     )
 
     # Create agent
