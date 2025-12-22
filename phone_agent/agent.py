@@ -275,7 +275,6 @@ class PhoneAgent:
                 current_app=current_app,
                 screen_width=screenshot.width,
                 screen_height=screenshot.height,
-                raw_model_input=raw_model_input,
                 raw_model_output=response.raw_content,
                 format_model_output=format_model_output,
             )
