@@ -80,7 +80,6 @@ class TraceLogger:
         current_app: str | None = None,
         screen_width: int | None = None,
         screen_height: int | None = None,
-        raw_model_input = None,
         raw_model_output = None,
         format_model_output = None,
     ) -> None:
@@ -96,7 +95,6 @@ class TraceLogger:
             current_app: Current app package name
             screen_width: Screen width in pixels
             screen_height: Screen height in pixels
-            raw_model_input: Raw model input
             raw_model_output: Raw model output
             format_model_output: Formatted model output
         """
@@ -133,7 +131,6 @@ class TraceLogger:
             "model_output": model_output,
             "thinking": thinking,
             "action": action,
-            "raw_model_input": raw_model_input,
             "raw_model_output": raw_model_output,
             "format_model_output": format_model_output,
         }
