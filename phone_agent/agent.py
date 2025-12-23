@@ -17,9 +17,9 @@ from phone_agent.trace_logger import TraceLogger, get_trace_logger
 
 # Import judge functionality
 try:
-    from judge_tools.judge import judge_model_output
+    from judge_tools.judge import judge_from_full_context
 except ImportError:
-    judge_model_output = None
+    judge_from_full_context = None
 
 
 @dataclass
@@ -33,14 +33,12 @@ class AgentConfig:
     verbose: bool = True
     enable_trace_logging: bool = True
     trace_root: str | None = None
-    # Judge configuration
-    enable_judge: bool = False
+    # Judge configuration (enabled by default)
+    enable_judge: bool = True
     judge_api_key: str = "sk-CJc3Kj313cPY3hsg28zIDGQ8vKkxhtXn"
     judge_base_url: str = "https://api-gateway.glm.ai/v1"
     judge_model_name: str = "claude-sonnet-4-5-20250929"
     judge_history_images_k: int = 5
-    # Interactive mode
-    enable_interactive: bool = False
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -191,8 +189,6 @@ class PhoneAgent:
 
     def _judge_step(
         self,
-        screenshot_base64: str,
-        screenshot_path: str | None = None,
     ) -> dict[str, Any] | None:
         """
         Use judge model to evaluate the current step.
@@ -207,60 +203,25 @@ class PhoneAgent:
         if not self.agent_config.enable_judge:
             return None
 
-        if judge_model_output is None:
+        if judge_from_full_context is None:
             if self.agent_config.verbose:
                 print("\n⚠️  Judge功能未启用：judge_tools.judge 模块无法导入")
             return None
 
         try:
-            import base64
-            import tempfile
-            import os
-            from pathlib import Path
-
-            # Prepare format_model_output
-            format_model_output = self._full_context[-1] if self._full_context else {}
-
-            # Get trace file path if logging is enabled
-            trace_file_path = None
-            if self.trace_logger and self._current_task_id:
-                trace_file_path = str(self.trace_logger.task_dir / "trace.jsonl")
-
-            # Save screenshot to file if not already saved
-            temp_screenshot = None
-            if screenshot_path and os.path.exists(screenshot_path):
-                actual_screenshot_path = screenshot_path
-            else:
-                # Create temporary screenshot file
-                temp_screenshot = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                screenshot_data = base64.b64decode(screenshot_base64)
-                temp_screenshot.write(screenshot_data)
-                temp_screenshot.close()
-                actual_screenshot_path = temp_screenshot.name
-
-            # Call judge
+            # Call judge with full_context
             if self.agent_config.verbose:
                 print("\n" + "=" * 50)
                 print("🔍 正在评估当前步骤...")
                 print("=" * 50)
 
-            judge_result = judge_model_output(
-                model_input=self._full_context[:-1],  # Exclude last assistant message
-                screenshot_path=actual_screenshot_path,
-                format_model_output=format_model_output,
-                trace_file_path=trace_file_path,
+            judge_result = judge_from_full_context(
+                full_context=self._full_context,
                 history_images_k=self.agent_config.judge_history_images_k,
                 api_key=self.agent_config.judge_api_key,
                 base_url=self.agent_config.judge_base_url,
                 model_name=self.agent_config.judge_model_name,
             )
-
-            # Clean up temporary file
-            if temp_screenshot:
-                try:
-                    os.unlink(temp_screenshot.name)
-                except:
-                    pass
 
             if self.agent_config.verbose:
                 print("\n📊 Judge评估结果:")
@@ -278,184 +239,6 @@ class PhoneAgent:
                 print(f"\n⚠️  Judge评估失败: {e}")
                 traceback.print_exc()
             return None
-
-    def _refine_action(
-        self,
-        judge_result: dict[str, Any],
-        original_response,
-        screenshot,
-        current_app: str,
-    ) -> tuple[dict[str, Any], Any]:
-        """
-        Refine the action based on judge suggestions.
-
-        Args:
-            judge_result: Judge evaluation result.
-            original_response: Original model response.
-            screenshot: Screenshot object.
-            current_app: Current app name.
-
-        Returns:
-            Tuple of (refined_action, refined_response).
-        """
-        try:
-            # Build refine prompt with judge suggestions
-            repair_suggestions = judge_result.get('repair_suggestions', '')
-            correct_action = judge_result.get('correct_action', '')
-
-            refine_prompt = f"""上一步的动作被判定为不合理。
-
-评估结果：
-- 评分: {judge_result.get('model_score', 'N/A')}/100
-- 置信度: {judge_result.get('model_confidence', 'N/A')}%
-
-修复建议：
-{repair_suggestions}
-
-"""
-            if correct_action:
-                refine_prompt += f"""建议的正确动作：
-{correct_action}
-
-"""
-            refine_prompt += "请根据上述建议，重新思考并生成正确的动作。"
-
-            # Add refine message to context (temporarily)
-            screen_info = MessageBuilder.build_screen_info(current_app)
-            refine_text = f"{refine_prompt}\n\n{screen_info}"
-
-            refine_msg = MessageBuilder.create_user_message(
-                text=refine_text, image_base64=screenshot.base64_data
-            )
-
-            # Create temporary context for refinement
-            temp_context = deepcopy(self._full_context)
-            temp_context.append(refine_msg)
-
-            if self.agent_config.verbose:
-                print("\n" + "=" * 50)
-                print("🔄 正在根据Judge建议重新生成动作...")
-                print("=" * 50)
-
-            # Get refined response
-            refined_response = self.model_client.request(temp_context)
-
-            # Parse refined action
-            try:
-                refined_action = parse_action(refined_response.action)
-            except ValueError:
-                refined_action = finish(message=refined_response.action)
-
-            if self.agent_config.verbose:
-                msgs = get_messages(self.agent_config.lang)
-                print("\n" + "=" * 50)
-                print(f"🔄 {msgs['action']} (Refined):")
-                print(json.dumps(refined_action, ensure_ascii=False, indent=2))
-                print("=" * 50 + "\n")
-
-            return refined_action, refined_response
-
-        except Exception as e:
-            if self.agent_config.verbose:
-                print(f"\n⚠️  Refine失败: {e}")
-                traceback.print_exc()
-            # Return original action if refine fails
-            original_action = parse_action(original_response.action)
-            return original_action, original_response
-
-    def _handle_user_interaction(
-        self,
-        judge_result: dict[str, Any] | None,
-        original_action: dict[str, Any],
-        refined_action: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Handle user interaction based on judge result.
-
-        Args:
-            judge_result: Judge evaluation result (None if judge disabled).
-            original_action: Original action from model.
-            refined_action: Refined action (if available).
-
-        Returns:
-            Selected action to execute.
-        """
-        if not self.agent_config.enable_interactive:
-            # If interactive mode is disabled, use refined action if available
-            if refined_action is not None and judge_result and not judge_result.get('verdict', True):
-                return refined_action
-            return original_action
-
-        print("\n" + "=" * 50)
-        print("⏸️  等待用户输入")
-        print("=" * 50)
-
-        # Show options based on judge result
-        if judge_result and not judge_result.get('verdict', True):
-            # Judge thinks the step is incorrect
-            print("\n⚠️  Judge认为当前步骤存在问题")
-            print(f"评分: {judge_result.get('model_score', 'N/A')}/100")
-            print(f"置信度: {judge_result.get('model_confidence', 'N/A')}%")
-            print(f"\n建议: {judge_result.get('repair_suggestions', 'N/A')}")
-
-            print("\n请选择:")
-            print("  1. 使用原始动作")
-            if refined_action:
-                print("  2. 使用修正后的动作")
-                print("  3. 跳过此步骤")
-                print("  q. 退出任务")
-            else:
-                print("  2. 跳过此步骤")
-                print("  q. 退出任务")
-        else:
-            # Judge thinks the step is OK (or judge is disabled)
-            if judge_result:
-                print("\n✅ Judge认为当前步骤合理")
-                print(f"评分: {judge_result.get('model_score', 'N/A')}/100")
-                print(f"置信度: {judge_result.get('model_confidence', 'N/A')}%")
-            print("\n请选择:")
-            print("  1. 继续执行")
-            print("  2. 跳过此步骤")
-            print("  q. 退出任务")
-
-        while True:
-            try:
-                choice = input("\n请输入选项 (1/2/3/q): ").strip().lower()
-
-                if choice == 'q':
-                    print("\n用户选择退出任务")
-                    return finish(message="用户中断任务")
-
-                if judge_result and not judge_result.get('verdict', True):
-                    if choice == '1':
-                        print("\n使用原始动作")
-                        return original_action
-                    elif choice == '2' and refined_action:
-                        print("\n使用修正后的动作")
-                        return refined_action
-                    elif choice == '2' and not refined_action:
-                        print("\n跳过此步骤")
-                        return finish(message="用户跳过此步骤")
-                    elif choice == '3':
-                        print("\n跳过此步骤")
-                        return finish(message="用户跳过此步骤")
-                    else:
-                        print("无效选项，请重新输入")
-                        continue
-                else:
-                    if choice == '1':
-                        print("\n继续执行")
-                        return original_action
-                    elif choice == '2':
-                        print("\n跳过此步骤")
-                        return finish(message="用户跳过此步骤")
-                    else:
-                        print("无效选项，请重新输入")
-                        continue
-
-            except (KeyboardInterrupt, EOFError):
-                print("\n\n用户中断任务")
-                return finish(message="用户中断任务")
 
     def _execute_step(
         self, user_prompt: str | None = None, is_first: bool = False
@@ -537,38 +320,65 @@ class PhoneAgent:
         self._full_context.append(deepcopy(assistant_msg))
         format_model_output = deepcopy(assistant_msg)
 
-        # Judge and refine if enabled
+        # Judge if enabled
         judge_result = None
-        refined_action = None
         screenshot_path = None
 
         if self.trace_logger and self._current_task_id:
             screenshot_path = str(self.trace_logger.task_dir / f"step_{self._step_count}.png")
 
-        if self.agent_config.enable_judge or self.agent_config.enable_interactive:
-            judge_result = self._judge_step(
-                screenshot_base64=screenshot.base64_data,
-                screenshot_path=screenshot_path,
-            )
+        if self.agent_config.enable_judge:
+            judge_result = self._judge_step()
 
-            # If judge thinks the step is incorrect, try to refine
+            # If judge thinks the step is incorrect, use judge's refined output
             if judge_result and not judge_result.get('verdict', True):
-                refined_action, refined_response = self._refine_action(
-                    judge_result=judge_result,
-                    original_response=response,
-                    screenshot=screenshot,
-                    current_app=current_app,
-                )
+                refined_thinking = judge_result.get('refined_thinking', '')
+                refined_action_str = judge_result.get('refined_action', '')
 
-        # Handle user interaction if enabled
-        if self.agent_config.enable_interactive or (
-            self.agent_config.enable_judge and judge_result and not judge_result.get('verdict', True)
-        ):
-            action = self._handle_user_interaction(
-                judge_result=judge_result,
-                original_action=action,
-                refined_action=refined_action,
-            )
+                if refined_thinking and refined_action_str:
+                    try:
+                        # Parse refined action from judge
+                        refined_action = parse_action(refined_action_str)
+
+                        if self.agent_config.verbose:
+                            print("\n" + "=" * 50)
+                            print("⚠️  Judge认为当前步骤存在问题")
+                            print(f"评分: {judge_result.get('model_score', 'N/A')}/100")
+                            print(f"置信度: {judge_result.get('model_confidence', 'N/A')}%")
+                            print(f"建议: {judge_result.get('repair_suggestions', 'N/A')}")
+                            print("\n🔄 使用Judge提供的修正输出:")
+                            print(f"Thinking: {refined_thinking[:100]}...")
+                            print(f"Action: {json.dumps(refined_action, ensure_ascii=False, indent=2)}")
+                            print("=" * 50)
+
+                        # Update action to use judge's refined action
+                        action = refined_action
+
+                        # Remove the original assistant message from context
+                        self._context.pop()
+                        self._full_context.pop()
+
+                        # Add judge's refined response to context
+                        refined_assistant_msg = MessageBuilder.create_assistant_message(
+                            f"<think>{refined_thinking}</think><answer>{refined_action_str}</answer>"
+                        )
+
+                        self._context.append(refined_assistant_msg)
+                        self._full_context.append(deepcopy(refined_assistant_msg))
+                        format_model_output = deepcopy(refined_assistant_msg)
+
+                    except Exception as e:
+                        if self.agent_config.verbose:
+                            print(f"\n⚠️  无法解析Judge的refined_action: {e}")
+                            print("使用原始Action")
+                else:
+                    if self.agent_config.verbose:
+                        print("\n⚠️  Judge判断为不合理，但未提供refined输出")
+                        print("使用原始Action")
+            elif judge_result and self.agent_config.verbose:
+                print("\n✅ Judge认为当前步骤合理")
+                print(f"评分: {judge_result.get('model_score', 'N/A')}/100")
+                print(f"置信度: {judge_result.get('model_confidence', 'N/A')}%")
 
         # Execute action
         try:

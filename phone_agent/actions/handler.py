@@ -379,6 +379,7 @@ def parse_action(response: str) -> dict[str, Any]:
 
                 return action
             except (SyntaxError, ValueError) as e:
+                print(f'Original response: {response}')
                 raise ValueError(f"Failed to parse do() action: {e}")
 
         elif response.startswith("finish"):

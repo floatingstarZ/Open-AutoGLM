@@ -74,16 +74,20 @@ JUDGE_TOOL = {
                 "maximum": 100,
                 "description": "判定的置信度 (0-100整数)"
             },
-            "correct_action": {
+            "refined_thinking": {
                 "type": "string",
-                "description": "如果判断为不合理(verdict=false)，提供正确的动作预测（JSON格式字符串）；如果判断为合理，则返回空字符串"
+                "description": "如果判断为不合理(verdict=false)，提供修正后的思考过程（thinking）；如果判断为合理，则返回空字符串"
+            },
+            "refined_action": {
+                "type": "string",
+                "description": "如果判断为不合理(verdict=false)，提供修正后的动作（action，如：do(action=\"Tap\", element=[500, 300])）；如果判断为合理，则返回空字符串"
             },
             "repair_suggestions": {
                 "type": "string",
-                "description": "可直接用于下一次修正的修复建议文本"
+                "description": "修复建议文本，说明为什么需要修正以及修正的依据"
             }
         },
-        "required": ["verdict", "scores", "loop_detected", "failed_steps", "model_score", "model_confidence", "correct_action", "repair_suggestions"]
+        "required": ["verdict", "scores", "loop_detected", "failed_steps", "model_score", "model_confidence", "refined_thinking", "refined_action", "repair_suggestions"]
     }
 }
 
@@ -121,10 +125,11 @@ JUDGE_PROMPT_TEMPLATE = """你是一个专注于模型执行审计与判定的�
   - why_failed (string): 失败原因说明
 - model_score (integer, 0-100): 模型对输出质量的判断分数，表示该输出满足用户需求的程度
 - model_confidence (integer, 0-100): 判定的置信度
-- correct_action (string): 如果判断为不合理(verdict=false)，提供正确的动作预测（JSON格式字符串，如：{{"action": "Tap", "coordinate": [100, 200]}}）；如果判断为合理，则返回空字符串
-- repair_suggestions (string): 修复建议文本，必须是一段连续文字（至少 2-4 句），描述可直接用于下一次执行的具体、可操作修正策略
+- refined_thinking (string): 如果判断为不合理(verdict=false)，提供修正后的完整思考过程；如果判断为合理，则返回空字符串
+- refined_action (string): 如果判断为不合理(verdict=false)，提供修正后的动作（如：do(action="Tap", element=[500, 300])）；如果判断为合理，则返回空字符串
+- repair_suggestions (string): 修复建议文本，说明为什么原输出不合理以及为什么修正后的输出是正确的
 
-必需参数: verdict, scores, loop_detected, failed_steps, model_score, model_confidence, correct_action, repair_suggestions
+必需参数: verdict, scores, loop_detected, failed_steps, model_score, model_confidence, refined_thinking, refined_action, repair_suggestions
 
 --- 输出格式要求（重要） ---
 **你必须严格按照以下JSON格式输出Judge工具的结果，不要添加任何其他文本或说明！**
@@ -140,18 +145,19 @@ JUDGE_PROMPT_TEMPLATE = """你是一个专注于模型执行审计与判定的�
       "reasoning_correctness": 50,
       "conciseness": 75
     }},
-    "loop_detected": true,
+    "loop_detected": false,
     "failed_steps": [
       {{
-        "step_id": "thinking",
-        "snippet": "思考内容片段...",
-        "why_failed": "失败原因说明"
+        "step_id": "action",
+        "snippet": "do(action=\\"Tap\\", element=[100, 100])",
+        "why_failed": "点击位置错误，应该点击屏幕中心的按钮"
       }}
     ],
     "model_score": 55,
     "model_confidence": 80,
-    "correct_action": "{{\\"action\\": \\"Tap\\", \\"coordinate\\": [100, 200]}}",
-    "repair_suggestions": "修复建议文本..."
+    "refined_thinking": "当前屏幕显示一个按钮位于中心位置坐标[500, 300]，需要点击该按钮以继续操作。",
+    "refined_action": "do(action=\\"Tap\\", element=[500, 300])",
+    "repair_suggestions": "原输出点击了错误的位置[100, 100]，该位置没有可交互元素。正确的做法是点击屏幕中心的按钮，坐标为[500, 300]。"
   }}
 }}
 ```
@@ -163,7 +169,8 @@ JUDGE_PROMPT_TEMPLATE = """你是一个专注于模型执行审计与判定的�
 - loop_detected必须是布尔值
 - failed_steps必须是数组，如果没有失败步骤则返回空数组[]
 - model_score和model_confidence必须是0-100之间的整数
-- correct_action必须是字符串，为空或JSON格式的动作（需要转义引号）
+- refined_thinking必须是字符串，如果verdict=true则为空字符串，如果verdict=false则提供完整的修正后的思考过程
+- refined_action必须是字符串，如果verdict=true则为空字符串，如果verdict=false则提供修正后的动作（需要转义引号）
 - repair_suggestions必须是字符串
 
 --- 评估准则（CRITICAL - 必须严格遵循） ---
@@ -184,7 +191,7 @@ JUDGE_PROMPT_TEMPLATE = """你是一个专注于模型执行审计与判定的�
      * 设置loop_detected=true
      * 设置verdict=false
      * 在failed_steps中说明循环的具体模式
-     * 在correct_action中提供打破循环的建议动作
+     * 在refined_thinking和refined_action中提供打破循环的修正输出
 
 **3. 动作预测的合理性**：
    - 检查action是否符合当前屏幕状态
@@ -204,7 +211,9 @@ JUDGE_PROMPT_TEMPLATE = """你是一个专注于模型执行审计与判定的�
 --- 评估原则 ---
 - 对于**最后一步**的评估要特别严格，因为这是决定任务成功与否的关键
 - 死循环检测是**强制性的**，一旦发现必须标记
-- 如果判断为不合理（verdict=false），**必须**在correct_action中提供具体的正确动作建议
+- 如果判断为不合理（verdict=false），**必须**同时提供refined_thinking和refined_action，给出完整的修正输出
+- refined_thinking应该包含完整的思考过程，说明为什么这样做是正确的
+- refined_action必须是可以直接执行的动作格式（如：do(action="Tap", element=[500, 300])）
 - 采用实用的评估标准，但不降低对明显错误（如死循环、thinking与action不一致）的判断标准
 
 --- 立即执行 ---
@@ -523,6 +532,71 @@ def load_screenshots_mapping(trace_file_path: str, current_step_index: int) -> d
         return {}
 
 
+def replace_base64_with_paths(
+    messages: list[dict[str, Any]],
+    trace_file_path: Optional[str],
+    screenshot_path: str,
+) -> list[dict[str, Any]]:
+    """
+    将messages中的base64图像数据替换为图像路径
+
+    Args:
+        messages: 原始消息列表（包含base64图像）
+        trace_file_path: trace文件路径
+        screenshot_path: 当前截图路径
+
+    Returns:
+        替换后的消息列表（包含图像路径而非base64）
+    """
+    import copy
+
+    # 深拷贝消息列表，避免修改原始数据
+    messages_copy = copy.deepcopy(messages)
+
+    # 如果有trace文件，加载截图映射
+    screenshots_map = {}
+    if trace_file_path:
+        current_step_index = extract_step_index_from_screenshot_path(screenshot_path)
+        if current_step_index:
+            screenshots_map = load_screenshots_mapping(trace_file_path, current_step_index)
+
+    # 获取trace根目录（用于生成相对路径）
+    trace_root = None
+    if trace_file_path:
+        trace_dir = os.path.dirname(trace_file_path)
+        trace_root = os.path.dirname(trace_dir) if trace_dir else os.getcwd()
+
+    # 遍历所有消息，替换base64图像为路径
+    user_msg_index = 0
+    for msg in messages_copy:
+        if msg.get("role") == "user":
+            user_msg_index += 1
+            content = msg.get("content", [])
+
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "image_url":
+                        # 找到对应的截图路径
+                        image_path = None
+
+                        # 尝试从screenshots_map获取路径
+                        if user_msg_index in screenshots_map and trace_root:
+                            screenshot_rel_path = screenshots_map[user_msg_index]
+                            image_path = os.path.join(trace_root, screenshot_rel_path)
+                        # 如果是最后一个user消息，使用当前截图路径
+                        elif user_msg_index == sum(1 for m in messages_copy if m.get("role") == "user"):
+                            image_path = screenshot_path
+
+                        # 替换base64为路径
+                        if image_path:
+                            item["image_url"] = {
+                                "path": image_path,
+                                "detail": "high"
+                            }
+
+    return messages_copy
+
+
 def save_judge_io(
     messages: list[dict[str, Any]],
     system_message: dict[str, Any],
@@ -559,13 +633,16 @@ def save_judge_io(
         # 默认保存到当前目录
         output_path = "judge_io.json"
 
+    # 替换base64图像为路径
+    messages_with_paths = replace_base64_with_paths(messages, trace_file_path, screenshot_path)
+
     # 构建保存的数据
     io_data = {
         "timestamp": datetime.now().isoformat(),
         "screenshot_path": screenshot_path,
         "input": {
             "system_message": system_message,
-            "messages": messages,
+            "messages": messages_with_paths,  # 使用替换后的消息列表
         },
         "output": {
             "raw_response": response_dict,
@@ -788,6 +865,197 @@ def judge_model_output(
                     save_path=save_io_path,
                     screenshot_path=screenshot_path
                 )
+
+            return judge_result
+
+        except Exception as e:
+            print(f"[RETRY {attempt + 1}/{max_retries}] Request exception: {e}")
+            import traceback
+            traceback.print_exc()
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+
+    raise Exception("LLM call failed after max retries")
+
+
+def judge_from_full_context(
+    full_context: list[dict[str, Any]],
+    history_images_k: int = 5,
+    api_key: str = DEFAULT_API_KEY,
+    base_url: str = DEFAULT_BASE_URL,
+    model_name: str = DEFAULT_MODEL_NAME,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: int = DEFAULT_RETRY_DELAY,
+) -> dict[str, Any]:
+    """
+    使用full_context评估GUIAgent模型的输出是否合理
+
+    Args:
+        full_context: 完整的对话历史,包含system、user(带图片)和assistant消息
+                     最后一个消息应该是需要评估的assistant消息
+        history_images_k: 保留最近K个user message的截图(默认5)
+                         例如: K=5,则只为最后5个user message保留截图
+        api_key: API密钥
+        base_url: API基础URL
+        model_name: 模型名称
+        max_retries: 最大重试次数
+        retry_delay: 重试延迟(秒)
+
+    Returns:
+        评估结果字典,包含:
+        - verdict: 是否合理(布尔值)
+        - scores: 评分字典
+        - loop_detected: 是否检测到死循环(布尔值)
+        - failed_steps: 失败步骤列表
+        - model_score: 模型评分(0-100)
+        - model_confidence: 置信度(0-100)
+        - correct_action: 正确的动作预测(字符串)
+        - repair_suggestions: 修复建议
+    """
+    if not full_context:
+        raise ValueError("full_context is empty")
+
+    # 提取system prompt
+    trace_system_prompt = extract_system_prompt(full_context)
+
+    # 构建judge prompt(嵌入GUIAgent的system prompt)
+    judge_prompt = JUDGE_PROMPT_TEMPLATE.format(trace_system_prompt=trace_system_prompt)
+
+    # 创建OpenAI客户端
+    client = OpenAI(base_url=base_url, api_key=api_key)
+
+    # 构建消息列表(排除system消息)
+    messages = []
+    user_msg_count = 0
+
+    for msg in full_context:
+        role = msg.get("role")
+
+        # 跳过system消息
+        if role == "system":
+            continue
+
+        # 处理user消息
+        elif role == "user":
+            user_msg_count += 1
+            content = msg.get("content", [])
+
+            # 确保content是列表格式
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            elif not isinstance(content, list):
+                content = [{"type": "text", "text": str(content)}]
+
+            # 根据history_images_k决定是否保留图片
+            # 计算从哪个user message开始保留图片
+            # 这个计数是从1开始的,所以我们需要在处理完所有消息后再过滤
+            messages.append({
+                "role": "user",
+                "content": content,
+                "_user_msg_index": user_msg_count
+            })
+
+        # 处理assistant消息
+        elif role == "assistant":
+            content = msg.get("content", "")
+            messages.append({
+                "role": "assistant",
+                "content": content if isinstance(content, str) else str(content)
+            })
+
+    # 根据history_images_k过滤user消息中的图片
+    # 只保留最近K个user message的图片
+    if history_images_k > 0:
+        total_user_msgs = user_msg_count
+        start_keeping_images_from = max(1, total_user_msgs - history_images_k + 1)
+
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_index = msg.pop("_user_msg_index", 0)
+
+                # 如果这个user message不在保留范围内,移除图片
+                if user_index < start_keeping_images_from:
+                    content = msg.get("content", [])
+                    # 只保留text类型的content,移除image_url
+                    if isinstance(content, list):
+                        msg["content"] = [
+                            item for item in content
+                            if item.get("type") != "image_url"
+                        ]
+    else:
+        # 如果history_images_k为0,移除所有图片
+        for msg in messages:
+            if msg.get("role") == "user":
+                msg.pop("_user_msg_index", None)
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    msg["content"] = [
+                        item for item in content
+                        if item.get("type") != "image_url"
+                    ]
+
+    # 添加judge请求消息(纯文本,不包含图片)
+    judge_user_message = {
+        "role": "user",
+        "content": "请使用Judge工具对上述模型输出进行评估,判断输出是否合理。请特别注意检查是否存在死循环(3次以上重复相同或相似的动作),以及thinking是否与action一致。"
+    }
+    messages.append(judge_user_message)
+
+    # 构建system prompt(只包含judge prompt)
+    system_message = {
+        "role": "system",
+        "content": judge_prompt
+    }
+
+    # 准备API调用参数(不使用tools参数,工具定义已包含在system prompt中)
+    api_params = {
+        "model": model_name,
+        "messages": [system_message] + messages,
+        "max_tokens": 16384,
+        "temperature": 0
+    }
+
+    # 重试机制
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(**api_params)
+
+            # 转换为字典格式
+            message = response.choices[0].message
+
+            tool_calls_list = []
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                tool_calls_list = [
+                    {
+                        "id": tc.id,
+                        "type": getattr(tc, 'type', 'function'),
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    } for tc in message.tool_calls
+                ]
+
+            reasoning_content = getattr(message, 'reasoning_content', None)
+
+            response_dict = {
+                "choices": [{
+                    "message": {
+                        "role": message.role,
+                        "content": message.content or "",
+                        "tool_calls": tool_calls_list,
+                        "reasoning_content": reasoning_content
+                    }
+                }],
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+                    "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+                    "total_tokens": response.usage.total_tokens if response.usage else 0
+                }
+            }
+
+            # 提取Judge结果
+            judge_result = extract_judge_result(response_dict)
 
             return judge_result
 
