@@ -34,6 +34,51 @@ def _generate_tool_use_id() -> str:
     return f"toolu_bdrk_{base64url_str}"
 
 
+def _scale_coordinates_in_text(text: str, scale_x: float, scale_y: float) -> str:
+    """
+    缩放文本中的坐标
+
+    支持的坐标格式：
+    - [x, y]
+    - [x,y]
+    - (x, y)
+    - (x,y)
+
+    Args:
+        text: 包含坐标的文本
+        scale_x: X坐标缩放因子
+        scale_y: Y坐标缩放因子
+
+    Returns:
+        缩放后的文本
+
+    Examples:
+        >>> _scale_coordinates_in_text("点击[123, 456]", 2.0, 2.0)
+        "点击[246, 912]"
+    """
+    if scale_x == 1.0 and scale_y == 1.0:
+        return text
+
+    def replace_coord(match):
+        """替换坐标的回调函数"""
+        bracket_start = match.group(1)  # [ 或 (
+        x = int(match.group(2))
+        y = int(match.group(3))
+        bracket_end = match.group(4)  # ] 或 )
+
+        # 缩放坐标
+        scaled_x = int(x * scale_x)
+        scaled_y = int(y * scale_y)
+
+        return f"{bracket_start}{scaled_x}, {scaled_y}{bracket_end}"
+
+    # 匹配 [x, y] 或 [x,y] 或 (x, y) 或 (x,y) 格式
+    # 坐标值必须是合理的范围（0-10000），避免误匹配其他数字对
+    pattern = r'([\[\(])(\d{1,5})\s*,\s*(\d{1,5})([\]\)])'
+
+    return re.sub(pattern, replace_coord, text)
+
+
 def _parse_action_string(action_str: str) -> Dict[str, Any]:
     """
     解析action字符串为字典
@@ -103,16 +148,16 @@ def _action_dict_to_string(action: Dict[str, Any]) -> str:
 
 def current_to_claude(
     messages: List[Dict[str, Any]],
-    current_image_scale: Optional[List[int]] = None,
     claude_image_scale: Optional[List[int]] = None
 ) -> List[Dict[str, Any]]:
     """
     将当前格式的对话历史转换为Claude格式
 
+    当前格式使用相对坐标(0-999)，Claude格式使用绝对坐标(基于实际图像分辨率)
+
     Args:
         messages: 当前格式的消息列表
-        current_image_scale: 当前格式中的图像分辨率 [width, height]，如果提供则进行坐标缩放
-        claude_image_scale: Claude推理时的图像分辨率 [width, height]，如果提供则进行坐标缩放
+        claude_image_scale: Claude推理时的图像分辨率 [width, height]，用于将相对坐标转换为绝对坐标
 
     Returns:
         Claude格式的消息列表
@@ -121,18 +166,20 @@ def current_to_claude(
         >>> current = [
         ...     {"role": "system", "content": "系统提示词..."},
         ...     {"role": "user", "content": [{"type": "text", "text": "任务描述"}]},
-        ...     {"role": "assistant", "content": "<think>思考</think><answer>do(action=\"Tap\", element=[100,200])</answer>"}
+        ...     {"role": "assistant", "content": "<think>思考</think><answer>do(action=\"Tap\", element=[500,500])</answer>"}
         ... ]
-        >>> claude = current_to_claude(current, [720, 1612], [1092, 1092])
+        >>> # 相对坐标[500,500] -> 绝对坐标[546,546] (基于1092x1092)
+        >>> claude = current_to_claude(current, claude_image_scale=[1092, 1092])
     """
     claude_messages = []
 
-    # 计算缩放因子
+    # 计算从相对坐标(0-999)到绝对坐标的缩放因子
+    # relative_to_absolute: absolute = relative / 999 * image_size
     scale_x = 1.0
     scale_y = 1.0
-    if current_image_scale and claude_image_scale:
-        scale_x = claude_image_scale[0] / current_image_scale[0]
-        scale_y = claude_image_scale[1] / current_image_scale[1]
+    if claude_image_scale:
+        scale_x = claude_image_scale[0] / 999.0
+        scale_y = claude_image_scale[1] / 999.0
 
     for msg in messages:
         role = msg.get("role")
@@ -165,16 +212,16 @@ def current_to_claude(
 
 def claude_to_current(
     messages: List[Dict[str, Any]],
-    claude_image_scale: Optional[List[int]] = None,
-    current_image_scale: Optional[List[int]] = None
+    claude_image_scale: Optional[List[int]] = None
 ) -> List[Dict[str, Any]]:
     """
     将Claude格式的对话历史转换为当前格式
 
+    Claude格式使用绝对坐标(基于实际图像分辨率)，当前格式使用相对坐标(0-999)
+
     Args:
         messages: Claude格式的消息列表
-        claude_image_scale: Claude推理时的图像分辨率 [width, height]，如果提供则进行坐标缩放
-        current_image_scale: 当前格式中的图像分辨率 [width, height]，如果提供则进行坐标缩放
+        claude_image_scale: Claude推理时的图像分辨率 [width, height]，用于将绝对坐标转换为相对坐标
 
     Returns:
         当前格式的消息列表
@@ -185,19 +232,21 @@ def claude_to_current(
         ...     {"role": "user", "content": [{"type": "text", "text": "任务描述"}]},
         ...     {"role": "assistant", "content": [
         ...         {"type": "thinking", "thinking": "思考"},
-        ...         {"type": "tool_use", "name": "Tap", "input": {"coordinate": [100, 200]}}
+        ...         {"type": "tool_use", "name": "Tap", "input": {"coordinate": [546, 546]}}
         ...     ]}
         ... ]
-        >>> current = claude_to_current(claude, [1092, 1092], [720, 1612])
+        >>> # 绝对坐标[546,546] -> 相对坐标[500,500] (基于1092x1092)
+        >>> current = claude_to_current(claude, claude_image_scale=[1092, 1092])
     """
     current_messages = []
 
-    # 计算缩放因子
+    # 计算从绝对坐标到相对坐标(0-999)的缩放因子
+    # absolute_to_relative: relative = absolute / image_size * 999
     scale_x = 1.0
     scale_y = 1.0
-    if claude_image_scale and current_image_scale:
-        scale_x = current_image_scale[0] / claude_image_scale[0]
-        scale_y = current_image_scale[1] / claude_image_scale[1]
+    if claude_image_scale:
+        scale_x = 999.0 / claude_image_scale[0]
+        scale_y = 999.0 / claude_image_scale[1]
 
     for msg in messages:
         role = msg.get("role")
@@ -247,9 +296,11 @@ def _parse_assistant_to_claude(content: str, scale_x: float = 1.0, scale_y: floa
     if think_match:
         thinking_text = think_match.group(1).strip()
         if thinking_text:
+            # 缩放thinking文本中的坐标
+            scaled_thinking = _scale_coordinates_in_text(thinking_text, scale_x, scale_y)
             claude_content.append({
                 "type": "thinking",
-                "thinking": thinking_text,
+                "thinking": scaled_thinking,
                 "signature": str(uuid.uuid4())
             })
 
@@ -315,11 +366,7 @@ def _parse_assistant_to_claude(content: str, scale_x: float = 1.0, scale_y: floa
                     "input": tool_input
                 })
         except ValueError as e:
-            # 如果解析失败，作为text处理
-            claude_content.append({
-                "type": "text",
-                "text": answer_text
-            })
+            raise Exception(f"Error parsing action string: \n", '-'*100 + '\n', str(e), '-'*100 + '\n')
 
     return claude_content
 
@@ -351,7 +398,9 @@ def _parse_claude_to_assistant(content: Any, scale_x: float = 1.0, scale_y: floa
         block_type = block.get("type")
 
         if block_type == "thinking":
-            thinking = block.get("thinking", "")
+            thinking_text = block.get("thinking", "")
+            # 缩放thinking文本中的坐标
+            thinking = _scale_coordinates_in_text(thinking_text, scale_x, scale_y)
 
         elif block_type == "tool_use":
             tool_name = block.get("name", "")
@@ -503,47 +552,44 @@ if __name__ == "__main__":
             print(f"  一致性: {orig_action == conv_action}")
     print()
 
-    # 示例2: 带坐标缩放的转换
+    # 示例2: 坐标转换（相对坐标 <-> 绝对坐标）
     print("=" * 80)
-    print("示例2: 带坐标缩放的转换")
+    print("示例2: 坐标转换（相对坐标0-999 <-> 绝对坐标）")
     print("=" * 80)
 
-    # 原始分辨率: 720x1612 (真实手机屏幕)
-    # Claude分辨率: 1092x1092 (正方形缩放)
-    current_image_scale = [720, 1612]
+    # Claude图像分辨率
     claude_image_scale = [1092, 1092]
 
-    print(f"当前图像分辨率: {current_image_scale}")
     print(f"Claude图像分辨率: {claude_image_scale}")
-    print(f"缩放因子: X={claude_image_scale[0]/current_image_scale[0]:.4f}, Y={claude_image_scale[1]/current_image_scale[1]:.4f}")
+    print(f"Current坐标范围: 0-999 (相对坐标)")
+    print(f"Claude坐标范围: 0-{claude_image_scale[0]}, 0-{claude_image_scale[1]} (绝对坐标)")
     print()
 
-    # 原始消息（坐标基于720x1612）
+    # 原始消息（使用相对坐标0-999）
     original_with_coords = [
         {
             "role": "assistant",
-            "content": "<think>点击搜索按钮</think><answer>do(action=\"Tap\", element=[360, 800])</answer>"
+            "content": "<think>点击屏幕中央</think><answer>do(action=\"Tap\", element=[500, 500])</answer>"
         },
         {
             "role": "assistant",
-            "content": "<think>向下滑动</think><answer>do(action=\"Swipe\", start=[360, 1200], end=[360, 400])</answer>"
+            "content": "<think>向下滑动</think><answer>do(action=\"Swipe\", start=[500, 700], end=[500, 300])</answer>"
         }
     ]
 
-    print("原始坐标（基于720x1612）:")
+    print("原始坐标（相对坐标，范围0-999）:")
     for msg in original_with_coords:
         _, action = extract_thinking_and_action(msg["content"])
         print(f"  {action}")
     print()
 
-    # 转换为Claude格式（坐标会被缩放到1092x1092）
+    # 转换为Claude格式（相对坐标 -> 绝对坐标）
     claude_with_scaling = current_to_claude(
         original_with_coords,
-        current_image_scale=current_image_scale,
         claude_image_scale=claude_image_scale
     )
 
-    print("Claude格式（坐标缩放到1092x1092）:")
+    print("Claude格式（绝对坐标，基于1092x1092）:")
     for msg in claude_with_scaling:
         if msg["role"] == "assistant":
             for block in msg["content"]:
@@ -551,14 +597,13 @@ if __name__ == "__main__":
                     print(f"  {block['name']}: {block['input']}")
     print()
 
-    # 转换回当前格式（坐标会被缩放回720x1612）
+    # 转换回当前格式（绝对坐标 -> 相对坐标）
     converted_back_with_scaling = claude_to_current(
         claude_with_scaling,
-        claude_image_scale=claude_image_scale,
-        current_image_scale=current_image_scale
+        claude_image_scale=claude_image_scale
     )
 
-    print("转换回当前格式（坐标恢复到720x1612）:")
+    print("转换回当前格式（相对坐标，范围0-999）:")
     for msg in converted_back_with_scaling:
         _, action = extract_thinking_and_action(msg["content"])
         print(f"  {action}")
@@ -592,4 +637,67 @@ if __name__ == "__main__":
             diff_end_y = abs(orig_dict["end"][1] - conv_dict["end"][1])
             print(f"  起点差异: X={diff_start_x}px, Y={diff_start_y}px")
             print(f"  终点差异: X={diff_end_x}px, Y={diff_end_y}px")
+        print()
+
+    # 示例3: Thinking中的坐标转换
+    print("=" * 80)
+    print("示例3: Thinking中的坐标转换")
+    print("=" * 80)
+
+    # 包含坐标的thinking（相对坐标0-999）
+    thinking_with_coords = [
+        {
+            "role": "assistant",
+            "content": "<think>我需要点击屏幕上的[500, 500]位置，这是搜索按钮的坐标。还要滑动从(300, 700)到(300, 300)。</think><answer>do(action=\"Tap\", element=[500, 500])</answer>"
+        }
+    ]
+
+    print("原始thinking（相对坐标0-999）:")
+    orig_think, _ = extract_thinking_and_action(thinking_with_coords[0]["content"])
+    print(f"  {orig_think}")
+    print()
+
+    # 转换为Claude格式（相对坐标 -> 绝对坐标）
+    claude_thinking = current_to_claude(
+        thinking_with_coords,
+        claude_image_scale=[1092, 1092]
+    )
+
+    print("Claude格式thinking（绝对坐标，基于1092x1092）:")
+    if claude_thinking[0]["role"] == "assistant":
+        for block in claude_thinking[0]["content"]:
+            if block["type"] == "thinking":
+                print(f"  {block['thinking']}")
+    print()
+
+    # 转换回当前格式（绝对坐标 -> 相对坐标）
+    current_thinking_back = claude_to_current(
+        claude_thinking,
+        claude_image_scale=[1092, 1092]
+    )
+
+    print("转换回当前格式thinking（相对坐标0-999）:")
+    conv_think, _ = extract_thinking_and_action(current_thinking_back[0]["content"])
+    print(f"  {conv_think}")
+    print()
+
+    # 测试_scale_coordinates_in_text函数
+    print("=" * 80)
+    print("测试: _scale_coordinates_in_text 函数")
+    print("=" * 80)
+
+    test_cases = [
+        ("点击[123, 456]", 2.0, 2.0, "点击[246, 912]"),
+        ("从(100, 200)滑动到(300, 400)", 1.5, 0.5, "从(150, 100)滑动到(450, 200)"),
+        ("坐标是 [50,100] 和 [200,300]", 2.0, 2.0, "坐标是 [100, 200] 和 [400, 600]"),
+        ("没有坐标的文本", 2.0, 2.0, "没有坐标的文本"),
+    ]
+
+    for text, scale_x, scale_y, expected in test_cases:
+        result = _scale_coordinates_in_text(text, scale_x, scale_y)
+        status = "✓" if result == expected else "✗"
+        print(f"{status} 输入: {text}")
+        print(f"  缩放: X={scale_x}, Y={scale_y}")
+        print(f"  预期: {expected}")
+        print(f"  结果: {result}")
         print()
