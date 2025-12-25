@@ -313,6 +313,41 @@ def generate_html(judge_io_data: dict[str, Any], output_path: str) -> None:
             margin-top: 10px;
         }}
 
+        .refined-thinking {{
+            background: #e7f3ff;
+            border: 1px solid #0066cc;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 10px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }}
+
+        .refined-action {{
+            background: #d1ecf1;
+            border: 1px solid #17a2b8;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 10px;
+        }}
+
+        .reasoning-content {{
+            margin-top: 10px;
+        }}
+
+        .reasoning-content pre {{
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 15px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 13px;
+            line-height: 1.6;
+            max-height: 600px;
+            overflow-y: auto;
+        }}
+
         .correct-action pre {{
             background: white;
             padding: 10px;
@@ -566,8 +601,12 @@ def generate_html(judge_io_data: dict[str, Any], output_path: str) -> None:
     failed_steps = judge_result.get("failed_steps", [])
     model_score = judge_result.get("model_score", 0)
     model_confidence = judge_result.get("model_confidence", 0)
+    # 支持新旧两种格式
     correct_action = judge_result.get("correct_action", "")
+    refined_thinking = judge_result.get("refined_thinking", "")
+    refined_action = judge_result.get("refined_action", "")
     repair_suggestions = judge_result.get("repair_suggestions", "")
+    reasoning_content = judge_result.get("reasoning_content", "")
 
     judge_result_html = f"""
     <div class="result-card">
@@ -652,8 +691,34 @@ def generate_html(judge_io_data: dict[str, Any], output_path: str) -> None:
         </div>
         """
 
-    # 正确动作
-    if correct_action:
+    # 修正后的思考（新格式）
+    if refined_thinking:
+        judge_result_html += f"""
+        <div class="result-row">
+            <div class="result-label">修正后的思考:</div>
+            <div class="result-value">
+                <div class="refined-thinking">
+                    {refined_thinking}
+                </div>
+            </div>
+        </div>
+        """
+
+    # 修正后的动作（新格式）
+    if refined_action:
+        judge_result_html += f"""
+        <div class="result-row">
+            <div class="result-label">修正后的动作:</div>
+            <div class="result-value">
+                <div class="refined-action">
+                    <pre>{refined_action}</pre>
+                </div>
+            </div>
+        </div>
+        """
+
+    # 正确动作（旧格式，向后兼容）
+    if correct_action and not refined_action:
         judge_result_html += f"""
         <div class="result-row">
             <div class="result-label">正确动作建议:</div>
@@ -671,6 +736,19 @@ def generate_html(judge_io_data: dict[str, Any], output_path: str) -> None:
         <div class="result-row">
             <div class="result-label">修复建议:</div>
             <div class="result-value">{repair_suggestions}</div>
+        </div>
+        """
+
+    # 推理过程（reasoning_content）
+    if reasoning_content:
+        judge_result_html += f"""
+        <div class="result-row">
+            <div class="result-label">推理过程:</div>
+            <div class="result-value">
+                <div class="reasoning-content">
+                    <pre>{reasoning_content}</pre>
+                </div>
+            </div>
         </div>
         """
 
