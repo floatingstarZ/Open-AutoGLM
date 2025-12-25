@@ -5,10 +5,55 @@
 ## 文件说明
 
 - `judge.py` - 主要评估脚本，调用大模型对trace进行判断
+- `judge_convert.py` - 对 convert_format 转换后的内容进行 judge（支持 trace.jsonl 格式）
 - `judge_base.py` - 基础工具（如果存在）
 - `visualizer.py` - 可视化工具，生成HTML页面展示评估结果
+- `convert_format.py` - 格式转换工具，实现当前格式 <-> Claude格式的双向转换
 
 ## 快速开始
+
+### 0. 评估 convert 后的 trace（推荐用于完整任务评估）
+
+`judge_convert.py` 用于评估整个任务的执行轨迹，它会：
+1. 读取 trace.jsonl 文件，收集所有步骤的对话历史
+2. 将当前格式转换为 Claude 格式（使用 convert_format.py）
+3. 将图片路径转换为 base64
+4. 调用 LLM 对整个任务进行判断
+
+**批量评估所有任务：**
+```bash
+python judge_tools/judge_convert.py --batch
+```
+
+**评估单个任务：**
+```bash
+python judge_tools/judge_convert.py --test task_20251224_1447
+```
+
+**自定义输入输出目录：**
+```bash
+python judge_tools/judge_convert.py --batch --input ./traces --output ./judge_results
+```
+
+**使用多个 worker 并行处理：**
+```bash
+python judge_tools/judge_convert.py --batch --workers 5
+```
+
+**限制处理数量（用于测试）：**
+```bash
+python judge_tools/judge_convert.py --batch --limit 10
+```
+
+评估结果会保存为 JSON 文件，包含：
+- `task_id`: 任务ID
+- `is_pass`: 是否通过（model_score >= 60）
+- `model_score`: 模型评分 (0-100)
+- `model_confidence`: 置信度 (0-100)
+- `verdict`: 是否完成用户需求
+- `scores`: 三个维度的评分
+- `failed_steps`: 失败步骤列表
+- `repair_suggestions`: 修复建议
 
 ### 1. 评估单个步骤
 

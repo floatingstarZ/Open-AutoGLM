@@ -16,6 +16,20 @@ from datetime import datetime
 
 from openai import OpenAI
 
+# 导入坐标转换函数
+try:
+    from .convert_format import current_relative_to_absolute
+except ImportError:
+    # 如果相对导入失败，尝试绝对导入
+    try:
+        from convert_format import current_relative_to_absolute
+    except ImportError:
+        # 如果导入失败，尝试从当前目录导入
+        import sys
+        import os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from convert_format import current_relative_to_absolute
+
 
 # ====================== Configuration ======================
 # 默认配置
@@ -25,6 +39,7 @@ DEFAULT_BASE_URL = "https://api-gateway.glm.ai/v1"
 DEFAULT_MODEL_NAME = "claude-sonnet-4-5-20250929"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 5
+TARGET_WIDTH = 512  # 图片缩放的目标宽度（短边）
 
 # Judge工具定义
 JUDGE_TOOL = {
@@ -214,17 +229,17 @@ JUDGE_PROMPT_TEMPLATE = """你是一个专注于模型执行审计与判定的�
 
 # ====================== Utility Functions ======================
 
-def load_image_as_base64(image_path: str, scaled_width: Optional[int] = None, scaled_height: Optional[int] = None) -> Optional[str]:
+def load_image_as_base64(image_path: str, scaled_width: Optional[int] = None, scaled_height: Optional[int] = None) -> tuple[Optional[str], Optional[int], Optional[int]]:
     """
-    加载图片，可选缩放，并转换为base64
+    加载图片，默认缩放（短边缩放到TARGET_WIDTH），并转换为base64
     
     Args:
         image_path: 图片文件路径
-        scaled_width: 目标宽度（None = 不缩放）
-        scaled_height: 目标高度（None = 不缩放）
+        scaled_width: 目标宽度（None = 使用默认缩放）
+        scaled_height: 目标高度（None = 使用默认缩放）
     
     Returns:
-        Base64编码的图片字符串
+        (Base64编码的图片字符串, 缩放后的宽度, 缩放后的高度)
     """
     try:
         # 如果是相对路径，尝试从traces目录查找
@@ -249,19 +264,33 @@ def load_image_as_base64(image_path: str, scaled_width: Optional[int] = None, sc
             if img.mode != 'RGB':
                 img = img.convert('RGB')
 
-            # 缩放图片（如果提供了缩放参数）
+            # 获取原始尺寸
+            width, height = img.size
+
+            # 缩放图片
             if scaled_width is not None and scaled_height is not None and scaled_width > 0 and scaled_height > 0:
-                img = img.resize((scaled_width, scaled_height), Image.LANCZOS)
+                # 使用指定的缩放尺寸
+                new_width, new_height = scaled_width, scaled_height
+            else:
+                # 默认缩放：短边缩放到TARGET_WIDTH，保持宽高比
+                if width < height:
+                    new_width = TARGET_WIDTH
+                    new_height = int(height * (TARGET_WIDTH / width))
+                else:
+                    new_height = TARGET_WIDTH
+                    new_width = int(width * (TARGET_WIDTH / height))
+            
+            img = img.resize((new_width, new_height), Image.LANCZOS)
 
             # 转换为base64
             buffer = io.BytesIO()
             img.save(buffer, format='PNG')
             b64_code = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-            return b64_code
+            return b64_code, new_width, new_height
     except Exception as e:
         print(f"[ERROR] Failed to load image {image_path}: {e}")
-        return None
+        return None, None, None
 
 
 def extract_system_prompt(model_input: list[dict[str, Any]]) -> str:
@@ -486,6 +515,56 @@ def extract_step_index_from_screenshot_path(screenshot_path: str) -> Optional[in
     return None
 
 
+# def load_screen_size(trace_file_path: str, step_index: Optional[int] = None) -> Optional[list[int]]:
+#     """
+#     从trace文件中加载屏幕分辨率信息
+
+#     Args:
+#         trace_file_path: trace文件路径
+#         step_index: 步骤索引（可选，如果提供则只从该步骤读取）
+
+#     Returns:
+#         屏幕分辨率 [width, height]，如果未找到则返回None
+#     """
+#     try:
+#         with open(trace_file_path, 'r', encoding='utf-8') as f:
+#             lines = f.readlines()
+
+#         # 如果指定了step_index，只读取该步骤
+#         if step_index is not None and 1 <= step_index <= len(lines):
+#             try:
+#                 step_data = json.loads(lines[step_index - 1].strip())
+#                 if step_data.get("type") == "step":
+#                     screen_info = step_data.get("screen_size", {})
+#                     if screen_info:
+#                         width = screen_info.get("width")
+#                         height = screen_info.get("height")
+#                         if width and height:
+#                             return [width, height]
+#             except (json.JSONDecodeError, KeyError):
+#                 pass
+
+#         # 否则遍历所有步骤，找到第一个包含screen_size的步骤
+#         for line in lines:
+#             try:
+#                 step_data = json.loads(line.strip())
+#                 if step_data.get("type") == "step":
+#                     screen_info = step_data.get("screen_size", {})
+#                     if screen_info:
+#                         width = screen_info.get("width")
+#                         height = screen_info.get("height")
+#                         if width and height:
+#                             return [width, height]
+#             except (json.JSONDecodeError, KeyError):
+#                 continue
+
+#         return None
+
+#     except Exception as e:
+#         print(f"[WARNING] Failed to load screen size: {e}")
+#         return None
+
+
 def load_screenshots_mapping(trace_file_path: str, current_step_index: int) -> dict[int, str]:
     """
     从trace文件中加载步骤索引到截图路径的映射
@@ -641,6 +720,10 @@ def judge_model_output(
     # 构建消息列表（排除system消息，不添加截图）
     messages = convert_model_input_to_openai_format(model_input, screenshot_base64=None, exclude_system=True)
 
+    # 初始化缩放尺寸变量
+    scaled_w = None
+    scaled_h = None
+    
     # 为最近的K个user message添加对应的截图
     if trace_file_path and history_images_k > 0:
         current_step_index = extract_step_index_from_screenshot_path(screenshot_path)
@@ -664,7 +747,11 @@ def judge_model_output(
                     if user_msg_index >= start_step and user_msg_index in screenshots_map:
                         screenshot_rel_path = screenshots_map[user_msg_index]
                         screenshot_full_path = os.path.join(trace_root, screenshot_rel_path)
-                        screenshot_base64 = load_image_as_base64(screenshot_full_path, scaled_width, scaled_height)
+                        screenshot_base64, img_w, img_h = load_image_as_base64(screenshot_full_path, scaled_width, scaled_height)
+                        
+                        # 保存最后一个截图的缩放尺寸
+                        if screenshot_base64:
+                            scaled_w, scaled_h = img_w, img_h
 
                         if screenshot_base64:
                             # 确保content是列表格式
@@ -684,7 +771,7 @@ def judge_model_output(
                             msg["content"] = content
     else:
         # 如果没有trace文件，只为最后一个user message添加当前截图
-        screenshot_base64 = load_image_as_base64(screenshot_path, scaled_width, scaled_height)
+        screenshot_base64, scaled_w, scaled_h = load_image_as_base64(screenshot_path, scaled_width, scaled_height)
         if screenshot_base64 is None:
             raise ValueError(f"Failed to load screenshot from {screenshot_path}")
 
@@ -714,6 +801,31 @@ def judge_model_output(
             "content": assistant_content if isinstance(assistant_content, str) else str(assistant_content)
         })
 
+    # 在添加judge_user_message之前，转换format_model_output中的坐标
+    # 获取当前截图的缩放尺寸（用于坐标转换）
+    # 如果之前加载过截图，使用其缩放尺寸；否则加载一次获取尺寸
+    if scaled_w is None or scaled_h is None:
+        _, scaled_w, scaled_h = load_image_as_base64(screenshot_path, scaled_width, scaled_height)
+    
+    # 转换format_model_output中的相对坐标到绝对坐标（基于缩放后的图片尺寸）
+    converted_format_model_output = format_model_output
+    if format_model_output and format_model_output.get("role") == "assistant" and scaled_w and scaled_h:
+        try:
+            content = format_model_output.get("content", "")
+            if isinstance(content, str):
+                # 创建一个临时的assistant消息用于转换
+                temp_messages = [{"role": "assistant", "content": content}]
+                # 使用缩放后的图片尺寸进行坐标转换（相对坐标0-999 -> 绝对坐标）
+                converted_temp = current_relative_to_absolute(temp_messages, image_scale=[scaled_w, scaled_h])
+                if converted_temp and len(converted_temp) > 0:
+                    converted_format_model_output = format_model_output.copy()
+                    converted_format_model_output["content"] = converted_temp[0]["content"]
+                    # 更新messages中的assistant消息
+                    messages[-1]["content"] = converted_temp[0]["content"]
+                    print(f"[INFO] 已将相对坐标转换为绝对坐标（基于缩放尺寸 {scaled_w}x{scaled_h}）")
+        except Exception as e:
+            print(f"[WARNING] 坐标转换失败: {e}，将使用原始坐标")
+
     # 添加judge请求消息（纯文本，不包含图片）
     judge_user_message = {
         "role": "user",
@@ -742,6 +854,7 @@ def judge_model_output(
             
             # 转换为字典格式
             message = response.choices[0].message
+            print(message)
             
             tool_calls_list = []
             if hasattr(message, 'tool_calls') and message.tool_calls:

@@ -320,14 +320,14 @@ Examples:
     parser.add_argument(
         "--base-url",
         type=str,
-        default=os.getenv("PHONE_AGENT_BASE_URL", "http://localhost:8000/v1"),
+        default=os.getenv("PHONE_AGENT_BASE_URL", "http://172.18.69.252:2002/v1"),
         help="Model API base URL",
     )
 
     parser.add_argument(
         "--model",
         type=str,
-        default=os.getenv("PHONE_AGENT_MODEL", "autoglm-phone-9b"),
+        default=os.getenv("PHONE_AGENT_MODEL", "glm-4.1v-base"),
         help="Model name",
     )
 
@@ -565,23 +565,43 @@ def main():
         agent_config=agent_config,
     )
 
-    # Print header
+    # Print header and all configuration parameters
     print("=" * 50)
     print("Phone Agent - AI-powered phone automation")
     print("=" * 50)
-    print(f"Model: {model_config.model_name}")
-    print(f"Base URL: {model_config.base_url}")
-    print(f"Max Steps: {agent_config.max_steps}")
-    print(f"Language: {agent_config.lang}")
-    print(f"Device Type: {args.device_type.upper()}")
+    print("\n📋 Configuration Parameters:")
+    print("-" * 50)
 
-    # Show device info
+    # Model Configuration
+    print("Model Configuration:")
+    print(f"  Base URL: {model_config.base_url}")
+    print(f"  Model Name: {model_config.model_name}")
+    print(f"  API Key: {model_config.api_key}")
+    print(f"  Max Tokens: {model_config.max_tokens}")
+    print(f"  Temperature: {model_config.temperature}")
+    print(f"  Top P: {model_config.top_p}")
+    print(f"  Frequency Penalty: {model_config.frequency_penalty}")
+    print(f"  Language: {model_config.lang}")
+
+    # Agent Configuration
+    print("\nAgent Configuration:")
+    print(f"  Max Steps: {agent_config.max_steps}")
+    print(f"  Language: {agent_config.lang}")
+    print(f"  Verbose: {agent_config.verbose}")
+    print(f"  Enable Trace Logging: {agent_config.enable_trace_logging}")
+    print(f"  Trace Root: {agent_config.trace_root}")
+
+    # Device Configuration
+    print("\nDevice Configuration:")
+    print(f"  Device Type: {args.device_type.upper()}")
     device_factory = get_device_factory()
     devices = device_factory.list_devices()
     if agent_config.device_id:
-        print(f"Device: {agent_config.device_id}")
+        print(f"  Device ID: {agent_config.device_id}")
     elif devices:
-        print(f"Device: {devices[0].device_id} (auto-detected)")
+        print(f"  Device ID: {devices[0].device_id} (auto-detected)")
+    else:
+        print(f"  Device ID: None")
 
     print("=" * 50)
 
