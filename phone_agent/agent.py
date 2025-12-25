@@ -2,9 +2,9 @@
 
 import json
 import traceback
-import uuid
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 
 from phone_agent.actions import ActionHandler
@@ -107,7 +107,9 @@ class PhoneAgent:
 
         # Start trace logging
         if self.trace_logger:
-            self._current_task_id = f"task_{uuid.uuid4().hex[:8]}"
+            # Use timestamp (down to minute) for task ID
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            self._current_task_id = f"task_{timestamp}"
             self.trace_logger.start_task(self._current_task_id, task)
             if self.agent_config.verbose:
                 print(f"\n📝 Trace logging enabled")
