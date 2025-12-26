@@ -141,7 +141,13 @@ class ModelClient:
 
         # Calculate total time
         total_time = time.time() - start_time
+        # 去掉<answer>, <think>等特殊标签
+        raw_content = raw_content.replace('<answer>', '')
+        raw_content = raw_content.replace('<think>', '')
+        raw_content = raw_content.replace('</think>', '')
+        raw_content = raw_content.replace('</answer>', '')
 
+        print(f"raw_content: \n", "-"*50, f"{raw_content}", "-"*50)
         # Parse thinking and action from response
         thinking, action = self._parse_response(raw_content)
 

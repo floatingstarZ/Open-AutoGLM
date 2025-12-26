@@ -20,15 +20,18 @@ class Screenshot:
     width: int
     height: int
     is_sensitive: bool = False
+    original_width: int | None = None  # Original screen width before resize
+    original_height: int | None = None  # Original screen height before resize
 
 
-def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screenshot:
+def get_screenshot(device_id: str | None = None, timeout: int = 10, target_size: tuple[int, int] | None = None) -> Screenshot:
     """
     Capture a screenshot from the connected Android device.
 
     Args:
         device_id: Optional ADB device ID for multi-device setups.
         timeout: Timeout in seconds for screenshot operations.
+        target_size: Optional target size as (width, height). If provided, screenshot will be resized.
 
     Returns:
         Screenshot object containing base64 data and dimensions.
@@ -67,6 +70,12 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
 
         # Read and encode image
         img = Image.open(temp_path)
+        original_width, original_height = img.size
+
+        # Resize if target size is specified
+        if target_size:
+            img = img.resize(target_size, Image.Resampling.LANCZOS)
+
         width, height = img.size
 
         buffered = BytesIO()
@@ -77,7 +86,12 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
         os.remove(temp_path)
 
         return Screenshot(
-            base64_data=base64_data, width=width, height=height, is_sensitive=False
+            base64_data=base64_data,
+            width=width,
+            height=height,
+            is_sensitive=False,
+            original_width=original_width,
+            original_height=original_height,
         )
 
     except Exception as e:
@@ -106,4 +120,6 @@ def _create_fallback_screenshot(is_sensitive: bool) -> Screenshot:
         width=default_width,
         height=default_height,
         is_sensitive=is_sensitive,
+        original_width=default_width,
+        original_height=default_height,
     )

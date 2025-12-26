@@ -22,12 +22,26 @@ from urllib.parse import urlparse
 
 from openai import OpenAI
 
+from datetime import datetime
+
 from phone_agent import PhoneAgent
 from phone_agent.agent import AgentConfig
+from phone_agent.actions.handler import do, finish, parse_action
+from phone_agent.config import get_system_prompt
 from phone_agent.config.apps import list_supported_apps
 from phone_agent.config.apps_harmonyos import list_supported_apps as list_harmonyos_apps
+from phone_agent.config.claude_prompt import get_claude_system_prompt
+from phone_agent.config.claude_tools import CLAUDE_TOOLS, APP_NAME_TO_PACKAGE
+from phone_agent.context_manager import ContextManager
 from phone_agent.device_factory import DeviceType, get_device_factory, set_device_type
 from phone_agent.model import ModelConfig
+from phone_agent.model.client import MessageBuilder
+from phone_agent.model.client_claude import (
+    ClaudeMessageBuilder,
+    ClaudeModelClient,
+    ClaudeModelConfig,
+)
+from phone_agent.trace_logger import get_trace_logger
 
 
 def check_system_requirements(device_type: DeviceType = DeviceType.ADB) -> bool:
@@ -402,6 +416,21 @@ Examples:
     )
 
     parser.add_argument(
+        "--coord-mode",
+        type=str,
+        choices=["relative", "absolute"],
+        default=os.getenv("PHONE_AGENT_COORD_MODE", "relative"),
+        help="Coordinate mode: 'relative' for relative coordinates (0-999), 'absolute' for absolute pixel coordinates (default: relative). Prompt is automatically switched based on this setting.",
+    )
+
+    parser.add_argument(
+        "--screenshot-size",
+        type=str,
+        default=os.getenv("PHONE_AGENT_SCREENSHOT_SIZE"),
+        help="Target screenshot size in format WIDTHxHEIGHT (e.g., '720x1280'). If not specified, original image size is used. Screenshots will be resized to this size before being sent to the model.",
+    )
+
+    parser.add_argument(
         "--device-type",
         type=str,
         choices=["adb", "hdc"],
@@ -422,6 +451,41 @@ Examples:
         help="Directory to save trace logs (default: ./traces)",
     )
 
+    # Claude-specific options
+    parser.add_argument(
+        "--use-claude",
+        action="store_true",
+        help="Use Claude API instead of OpenAI-compatible API",
+    )
+
+    parser.add_argument(
+        "--claude-api-key",
+        type=str,
+        default=os.getenv("CLAUDE_API_KEY", "EMPTY"),
+        help="API key for Claude API (default: from CLAUDE_API_KEY env var)",
+    )
+
+    parser.add_argument(
+        "--claude-base-url",
+        type=str,
+        default=os.getenv("CLAUDE_BASE_URL", "https://api-gateway.glm.ai/v1"),
+        help="Base URL for Claude API (default: https://api-gateway.glm.ai/v1)",
+    )
+
+    parser.add_argument(
+        "--claude-model",
+        type=str,
+        default=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
+        help="Claude model name (default: claude-sonnet-4-20250514)",
+    )
+
+    parser.add_argument(
+        "--claude-screenshot-width",
+        type=int,
+        default=512,
+        help="Target screenshot width for Claude (default: 512)",
+    )
+
     parser.add_argument(
         "task",
         nargs="?",
@@ -430,6 +494,318 @@ Examples:
     )
 
     return parser.parse_args()
+
+
+def run_task_with_claude(
+    claude_client: ClaudeModelClient,
+    agent_config: AgentConfig,
+    task: str,
+    device_id: str | None = None
+) -> str:
+    """
+    Run a task using Claude API.
+
+    Args:
+        claude_client: ClaudeModelClient instance
+        agent_config: Agent configuration
+        task: Task description
+        device_id: Device ID for device operations
+
+    Returns:
+        Final result message
+    """
+    # Initialize context
+    context = []
+
+    # Initialize context manager
+    context_manager = ContextManager(max_images=30)
+
+    # Get Claude system prompt
+    system_prompt = get_claude_system_prompt()
+
+    # Initialize trace logger if enabled
+    trace_logger = None
+    task_id = None
+    if agent_config.enable_trace_logging:
+        trace_logger = get_trace_logger(agent_config.trace_root)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        task_id = f"task_{timestamp}"
+        trace_logger.start_task(task_id, task)
+        if agent_config.verbose:
+            print(f"\n📝 Trace logging enabled")
+            print(f"   Task ID: {task_id}")
+            print(f"   Trace directory: {trace_logger.task_dir.absolute()}\n")
+
+    # Get device factory
+    device_factory = get_device_factory()
+
+    # Import action handler
+    from phone_agent.actions import ActionHandler
+    action_handler = ActionHandler(
+        device_id=device_id,
+        coord_mode=agent_config.coord_mode
+    )
+
+    step_count = 0
+    max_steps = agent_config.max_steps
+
+    try:
+        # First step: send task with screenshot
+        screenshot = device_factory.get_screenshot(device_id=device_id)
+        current_app = device_factory.get_current_app(device_id)
+
+        # Resize screenshot
+        height, width, resized_base64 = claude_client.resize_screenshot(
+            screenshot.base64_data
+        )
+
+        # Build first message
+        text = f"{task}\n\n<system-reminder>当前app: {current_app}, Screenshot dimensions: ({width}x{height}, png)</system-reminder>"
+
+        first_message = ClaudeMessageBuilder.create_user_message_with_image(
+            text=text,
+            image_base64=resized_base64,
+            image_width=width,
+            image_height=height
+        )
+
+        context.append(first_message)
+
+        # Main loop
+        while step_count < max_steps:
+            step_count += 1
+
+            # Call Claude API
+            if agent_config.verbose:
+                print("\n" + "=" * 50)
+                print("💭 Calling Claude API...")
+                print("-" * 50)
+
+            response = claude_client.request(
+                messages=context,
+                system_prompt=system_prompt,
+                tools=CLAUDE_TOOLS
+            )
+
+            # Add assistant response to context
+            context.append(
+                ClaudeMessageBuilder.create_assistant_message(response.raw_content)
+            )
+
+            # Apply context engineering
+            context = context_manager.apply_context_engineering(context)
+
+            # Log step
+            if trace_logger and task_id:
+                trace_logger.log_step(
+                    screenshot_base64=screenshot.base64_data,
+                    model_input=context[:-1],
+                    model_output=response.action,
+                    thinking=response.thinking,
+                    action=response.tool_use or {"text": response.action},
+                    current_app=current_app,
+                    screen_width=screenshot.width,
+                    screen_height=screenshot.height,
+                    raw_model_output=response.raw_content,
+                    format_model_output=context[-1]
+                )
+
+            # Check if we have a tool use
+            if response.tool_use:
+                tool_name = response.tool_use.get("name")
+                tool_input = response.tool_use.get("input", {})
+
+                if agent_config.verbose:
+                    print(f"\n🔧 Tool: {tool_name}")
+                    print(f"   Input: {tool_input}\n")
+
+                # Convert Launch app_name to package_name
+                if tool_name == "Launch":
+                    app_name = tool_input.get("app_name")
+                    package_name = APP_NAME_TO_PACKAGE.get(app_name, "")
+                    if not package_name:
+                        return f"Error: Unknown app '{app_name}'"
+                    tool_input["package_name"] = package_name
+                    del tool_input["app_name"]
+
+                # Build action dict for ActionHandler
+                action_dict = do(action=tool_name, **tool_input)
+
+                # Execute action
+                result = action_handler.execute(
+                    action_dict,
+                    screenshot.original_width or screenshot.width,
+                    screenshot.original_height or screenshot.height,
+                    screenshot.width,
+                    screenshot.height
+                )
+
+                # Check if finished
+                if result.should_finish or action_dict.get("_metadata") == "finish":
+                    if trace_logger:
+                        trace_logger.reset()
+                        if agent_config.verbose:
+                            print(f"\n📊 Trace saved: {trace_logger.task_dir.absolute()}")
+                    return result.message or "Task completed"
+
+                # Get new screenshot for next iteration
+                screenshot = device_factory.get_screenshot(device_id=device_id)
+                current_app = device_factory.get_current_app(device_id)
+
+                # Resize screenshot
+                height, width, resized_base64 = claude_client.resize_screenshot(
+                    screenshot.base64_data
+                )
+
+                # Build tool result message
+                result_text = result.message or f"{tool_name} executed successfully"
+                tool_result_msg = ClaudeMessageBuilder.create_tool_result(
+                    tool_use_id=response.tool_use.get("id"),
+                    result_text=f"{result_text}\n\n<system-reminder>当前app: {current_app}, Screenshot dimensions: ({width}x{height}, png)</system-reminder>",
+                    image_base64=resized_base64,
+                    image_width=width,
+                    image_height=height
+                )
+
+                context.append(tool_result_msg)
+
+                # Remove images from context to save space
+                context = ClaudeMessageBuilder.remove_images_from_message(context[-2])
+
+            else:
+                # Text response - task finished or needs clarification
+                if agent_config.verbose:
+                    print(f"\n📝 Text response: {response.action}\n")
+
+                if trace_logger:
+                    trace_logger.reset()
+                    if agent_config.verbose:
+                        print(f"\n📊 Trace saved: {trace_logger.task_dir.absolute()}")
+
+                return response.action
+
+        # Max steps reached
+        if trace_logger:
+            trace_logger.reset()
+            if agent_config.verbose:
+                print(f"\n📊 Trace saved: {trace_logger.task_dir.absolute()}")
+        return "Max steps reached"
+
+    except Exception as e:
+        if trace_logger:
+            trace_logger.reset()
+        raise
+
+
+def run_task(agent: PhoneAgent, agent_config: AgentConfig, task: str) -> str:
+    """
+    Run a task using the agent with context management and trace logging.
+
+    Args:
+        agent: PhoneAgent instance
+        agent_config: Agent configuration
+        task: Task description
+
+    Returns:
+        Final result message
+    """
+    # Initialize context
+    context = []
+
+    # Add system message for first call
+    if agent_config.system_prompt:
+        context.append(MessageBuilder.create_system_message(agent_config.system_prompt))
+
+    # Initialize context manager
+    context_manager = ContextManager(max_images=30)
+
+    # Initialize trace logger if enabled
+    trace_logger = None
+    task_id = None
+    if agent_config.enable_trace_logging:
+        trace_logger = get_trace_logger(agent_config.trace_root)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        task_id = f"task_{timestamp}"
+        trace_logger.start_task(task_id, task)
+        if agent_config.verbose:
+            print(f"\n📝 Trace logging enabled")
+            print(f"   Task ID: {task_id}")
+            print(f"   Trace directory: {trace_logger.task_dir.absolute()}\n")
+
+    step_count = 0
+
+    try:
+        # First step with user prompt
+        result = agent.step(
+            context=context,
+            user_prompt=task
+        )
+        step_count += 1
+
+        # Log first step if trace logging enabled
+        if trace_logger and task_id:
+            trace_logger.log_step(
+                screenshot_base64=None,  # Agent captures internally
+                model_input=context[:-1],
+                model_output=result.action,
+                thinking=result.thinking,
+                action=result.action,
+                current_app="",
+                screen_width=1080,
+                screen_height=1920,
+                raw_model_output=result.action,
+                format_model_output=context[-1] if context else {}
+            )
+
+        # Apply context engineering
+        context = context_manager.apply_context_engineering(context)
+
+        if result.finished:
+            if trace_logger:
+                trace_logger.reset()
+            return result.message or "Task completed"
+
+        # Continue until finished or max steps
+        while step_count < agent_config.max_steps:
+            result = agent.step(context=context)
+            step_count += 1
+
+            # Log step
+            if trace_logger and task_id:
+                trace_logger.log_step(
+                    screenshot_base64=None,
+                    model_input=context[:-1],
+                    model_output=result.action,
+                    thinking=result.thinking,
+                    action=result.action,
+                    current_app="",
+                    screen_width=1080,
+                    screen_height=1920,
+                    raw_model_output=result.action,
+                    format_model_output=context[-1] if context else {}
+                )
+
+            # Apply context engineering
+            context = context_manager.apply_context_engineering(context)
+
+            if result.finished:
+                if trace_logger:
+                    trace_logger.reset()
+                    if agent_config.verbose:
+                        print(f"\n📊 Trace saved: {trace_logger.task_dir.absolute()}")
+                return result.message or "Task completed"
+
+        # Max steps reached
+        if trace_logger:
+            trace_logger.reset()
+            if agent_config.verbose:
+                print(f"\n📊 Trace saved: {trace_logger.task_dir.absolute()}")
+        return "Max steps reached"
+
+    except Exception as e:
+        if trace_logger:
+            trace_logger.reset()
+        raise
 
 
 def handle_device_commands(args) -> bool:
@@ -538,32 +914,63 @@ def main():
     if not check_system_requirements(device_type):
         sys.exit(1)
 
-    # Check model API connectivity and model availability
-    if not check_model_api(args.base_url, args.model, args.apikey):
-        sys.exit(1)
+    # Check model API connectivity (skip for Claude mode)
+    if not args.use_claude:
+        if not check_model_api(args.base_url, args.model, args.apikey):
+            sys.exit(1)
 
-    # Create configurations
-    model_config = ModelConfig(
-        base_url=args.base_url,
-        model_name=args.model,
-        api_key=args.apikey,
-        lang=args.lang,
-    )
+    # Create configurations based on model type
+    if args.use_claude:
+        # Claude mode
+        print("\n🤖 Using Claude API")
+        claude_config = ClaudeModelConfig(
+            api_key=args.claude_api_key,
+            base_url=args.claude_base_url,
+            model_name=args.claude_model,
+            target_screenshot_width=args.claude_screenshot_width,
+            lang=args.lang
+        )
+        claude_client = ClaudeModelClient(claude_config)
+        system_prompt = get_claude_system_prompt()
+    else:
+        # OpenAI-compatible mode
+        print("\n🤖 Using OpenAI-compatible API")
+        model_config = ModelConfig(
+            base_url=args.base_url,
+            model_name=args.model,
+            api_key=args.apikey,
+            lang=args.lang,
+        )
+        # 根据参数获取对应的 system prompt
+        system_prompt = get_system_prompt(lang=args.lang, prompt_type=args.coord_mode)
+
+    # Parse screenshot size if provided (not used in Claude mode)
+    screenshot_size = None
+    if args.screenshot_size and not args.use_claude:
+        try:
+            width, height = args.screenshot_size.split('x')
+            screenshot_size = (int(width), int(height))
+        except ValueError:
+            print(f"Warning: Invalid screenshot size format '{args.screenshot_size}'. Expected format: WIDTHxHEIGHT (e.g., '720x1280'). Using original size.")
 
     agent_config = AgentConfig(
         max_steps=args.max_steps,
         device_id=args.device_id,
         verbose=not args.quiet,
         lang=args.lang,
+        system_prompt=system_prompt,
         enable_trace_logging=not args.disable_trace,
         trace_root=args.trace_root,
+        screenshot_size=screenshot_size,
+        coord_mode=args.coord_mode,
     )
 
-    # Create agent
-    agent = PhoneAgent(
-        model_config=model_config,
-        agent_config=agent_config,
-    )
+    # Create agent (only for OpenAI-compatible mode)
+    if not args.use_claude:
+        agent = PhoneAgent(
+            model_config=model_config,
+            agent_config=agent_config,
+        )
 
     # Print header and all configuration parameters
     print("=" * 50)
@@ -574,19 +981,32 @@ def main():
 
     # Model Configuration
     print("Model Configuration:")
-    print(f"  Base URL: {model_config.base_url}")
-    print(f"  Model Name: {model_config.model_name}")
-    print(f"  API Key: {model_config.api_key}")
-    print(f"  Max Tokens: {model_config.max_tokens}")
-    print(f"  Temperature: {model_config.temperature}")
-    print(f"  Top P: {model_config.top_p}")
-    print(f"  Frequency Penalty: {model_config.frequency_penalty}")
-    print(f"  Language: {model_config.lang}")
+    if args.use_claude:
+        print(f"  Mode: Claude API")
+        print(f"  Base URL: {claude_config.base_url}")
+        print(f"  Model Name: {claude_config.model_name}")
+        print(f"  API Key: {claude_config.api_key[:20]}...")
+        print(f"  Max Tokens: {claude_config.max_tokens}")
+        print(f"  Thinking Budget: {claude_config.thinking_budget_tokens}")
+        print(f"  Screenshot Width: {claude_config.target_screenshot_width}")
+        print(f"  Language: {claude_config.lang}")
+    else:
+        print(f"  Mode: OpenAI-compatible API")
+        print(f"  Base URL: {model_config.base_url}")
+        print(f"  Model Name: {model_config.model_name}")
+        print(f"  API Key: {model_config.api_key}")
+        print(f"  Max Tokens: {model_config.max_tokens}")
+        print(f"  Temperature: {model_config.temperature}")
+        print(f"  Top P: {model_config.top_p}")
+        print(f"  Frequency Penalty: {model_config.frequency_penalty}")
+        print(f"  Language: {model_config.lang}")
 
     # Agent Configuration
     print("\nAgent Configuration:")
     print(f"  Max Steps: {agent_config.max_steps}")
     print(f"  Language: {agent_config.lang}")
+    print(f"  Coordinate Mode: {args.coord_mode}")
+    print(f"  Screenshot Size: {f'{screenshot_size[0]}x{screenshot_size[1]}' if screenshot_size else 'Original'}")
     print(f"  Verbose: {agent_config.verbose}")
     print(f"  Enable Trace Logging: {agent_config.enable_trace_logging}")
     print(f"  Trace Root: {agent_config.trace_root}")
@@ -608,7 +1028,10 @@ def main():
     # Run with provided task or enter interactive mode
     if args.task:
         print(f"\nTask: {args.task}\n")
-        result = agent.run(args.task)
+        if args.use_claude:
+            result = run_task_with_claude(claude_client, agent_config, args.task, args.device_id)
+        else:
+            result = run_task(agent, agent_config, args.task)
         print(f"\nResult: {result}")
     else:
         # Interactive mode
@@ -626,9 +1049,12 @@ def main():
                     continue
 
                 print()
-                result = agent.run(task)
+                if args.use_claude:
+                    result = run_task_with_claude(claude_client, agent_config, task, args.device_id)
+                else:
+                    result = run_task(agent, agent_config, task)
+                    agent.reset()
                 print(f"\nResult: {result}\n")
-                agent.reset()
 
             except KeyboardInterrupt:
                 print("\n\nInterrupted. Goodbye!")

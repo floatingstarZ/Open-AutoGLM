@@ -27,6 +27,8 @@ class AgentConfig:
     verbose: bool = True
     enable_trace_logging: bool = True
     trace_root: str | None = None
+    screenshot_size: tuple[int, int] | None = None  # (width, height) or None for original size
+    coord_mode: str = "relative"  # "relative" for 0-999 coords, "absolute" for pixel coords
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -79,133 +81,77 @@ class PhoneAgent:
         self.model_client = ModelClient(self.model_config)
         self.action_handler = ActionHandler(
             device_id=self.agent_config.device_id,
+            coord_mode=self.agent_config.coord_mode,
             confirmation_callback=confirmation_callback,
             takeover_callback=takeover_callback,
         )
 
-        # Initialize trace logger if enabled
-        self.trace_logger: TraceLogger | None = None
-        if self.agent_config.enable_trace_logging:
-            self.trace_logger = get_trace_logger(self.agent_config.trace_root)
-
-        self._context: list[dict[str, Any]] = []
-        self._step_count = 0
-        self._current_task_id: str | None = None
-
-    def run(self, task: str) -> str:
-        """
-        Run the agent to complete a task.
-
-        Args:
-            task: Natural language description of the task.
-
-        Returns:
-            Final message from the agent.
-        """
-        self._context = []
         self._step_count = 0
 
-        # Start trace logging
-        if self.trace_logger:
-            # Use timestamp (down to minute) for task ID
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-            self._current_task_id = f"task_{timestamp}"
-            self.trace_logger.start_task(self._current_task_id, task)
-            if self.agent_config.verbose:
-                print(f"\n📝 Trace logging enabled")
-                print(f"   Task ID: {self._current_task_id}")
-                print(f"   Trace directory: {self.trace_logger.task_dir.absolute()}\n")
-
-        try:
-            # First step with user prompt
-            result = self._execute_step(task, is_first=True)
-
-            if result.finished:
-                final_message = result.message or "Task completed"
-                if self.trace_logger:
-                    self.trace_logger.reset()
-                return final_message
-
-            # Continue until finished or max steps reached
-            while self._step_count < self.agent_config.max_steps:
-                result = self._execute_step(is_first=False)
-
-                if result.finished:
-                    final_message = result.message or "Task completed"
-                    if self.trace_logger:
-                        self.trace_logger.reset()
-                    return final_message
-
-            # Max steps reached
-            if self.trace_logger:
-                self.trace_logger.reset()
-                if self.agent_config.verbose:
-                    print(f"\n📊 Trace saved: {self.trace_logger.task_dir.absolute()}")
-            return "Max steps reached"
-
-        except Exception as e:
-            # Reset trace logger on error
-            if self.trace_logger:
-                self.trace_logger.reset()
-            raise
-
-    def step(self, task: str | None = None) -> StepResult:
-        """
-        Execute a single step of the agent.
-
-        Useful for manual control or debugging.
-
-        Args:
-            task: Task description (only needed for first step).
-
-        Returns:
-            StepResult with step details.
-        """
-        is_first = len(self._context) == 0
-
-        if is_first and not task:
-            raise ValueError("Task is required for the first step")
-
-        return self._execute_step(task, is_first)
-
-    def reset(self) -> None:
-        """Reset the agent state for a new task."""
-        self._context = []
-        self._step_count = 0
-        self._current_task_id = None
-
-    def _execute_step(
-        self, user_prompt: str | None = None, is_first: bool = False
+    def step(
+        self,
+        context: list[dict[str, Any]],
+        screenshot_base64: str | None = None,
+        current_app: str | None = None,
+        user_prompt: str | None = None
     ) -> StepResult:
-        """Execute a single step of the agent loop."""
+        """
+        Execute a single step with external context.
+
+        Args:
+            context: External conversation context (will be modified)
+            screenshot_base64: Optional screenshot
+            current_app: Optional current app name
+            user_prompt: Optional user prompt (for first message)
+
+        Returns:
+            StepResult with step details
+        """
         self._step_count += 1
 
-        # Capture current screen state
-        device_factory = get_device_factory()
-        screenshot = device_factory.get_screenshot(self.agent_config.device_id)
-        current_app = device_factory.get_current_app(self.agent_config.device_id)
-
-        # Build messages
-        if is_first:
-            self._context.append(
-                MessageBuilder.create_system_message(self.agent_config.system_prompt)
+        # Capture screenshot if not provided
+        if screenshot_base64 is None:
+            device_factory = get_device_factory()
+            screenshot = device_factory.get_screenshot(
+                device_id=self.agent_config.device_id,
+                target_size=self.agent_config.screenshot_size
             )
+            screenshot_base64 = screenshot.base64_data
+            screen_width = screenshot.original_width or screenshot.width
+            screen_height = screenshot.original_height or screenshot.height
+        else:
+            # Use provided screenshot, assume dimensions from device
+            device_factory = get_device_factory()
+            screen_width = 1080  # Default, should be passed in
+            screen_height = 1920  # Default, should be passed in
 
+        # Get current app if not provided
+        if current_app is None:
+            device_factory = get_device_factory()
+            current_app = device_factory.get_current_app(self.agent_config.device_id)
+
+        # Build dimension reminder for absolute coordinate mode
+        dimension_reminder = ""
+        if self.agent_config.coord_mode == "absolute":
+            dimension_reminder = f"\nScreenshot dimensions: ({screen_width}x{screen_height}, png)"
+
+        # Build message
+        if user_prompt:
+            # First message with user prompt
             screen_info = MessageBuilder.build_screen_info(current_app)
-            text_content = f"{user_prompt}\n\n{screen_info}"
-
-            self._context.append(
+            text_content = f"{user_prompt}\n\n{screen_info}{dimension_reminder}"
+            context.append(
                 MessageBuilder.create_user_message(
-                    text=text_content, image_base64=screenshot.base64_data
+                    text=text_content, image_base64=screenshot_base64
                 )
             )
         else:
+            # Continuation message
             screen_info = MessageBuilder.build_screen_info(current_app)
-            text_content = f"** Screen Info **\n\n{screen_info}"
-
-            self._context.append(
+            text_content = f"** Screen Info **\n\n{screen_info}{dimension_reminder}"
+            context.append(
                 MessageBuilder.create_user_message(
-                    text=text_content, image_base64=screenshot.base64_data
+                    text=text_content, image_base64=screenshot_base64
                 )
             )
 
@@ -215,7 +161,7 @@ class PhoneAgent:
             print("\n" + "=" * 50)
             print(f"💭 {msgs['thinking']}:")
             print("-" * 50)
-            response = self.model_client.request(self._context)
+            response = self.model_client.request(context)
         except Exception as e:
             if self.agent_config.verbose:
                 traceback.print_exc()
@@ -227,7 +173,7 @@ class PhoneAgent:
                 message=f"Model error: {e}",
             )
 
-        # Parse action from response
+        # Parse action
         try:
             action = parse_action(response.action)
         except ValueError:
@@ -236,50 +182,34 @@ class PhoneAgent:
             action = finish(message=response.action)
 
         if self.agent_config.verbose:
-            # Print thinking process
             print("-" * 50)
             print(f"🎯 {msgs['action']}:")
             print(json.dumps(action, ensure_ascii=False, indent=2))
             print("=" * 50 + "\n")
 
         # Remove image from context to save space
-        raw_model_input = deepcopy(self._context)
-        self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
+        context[-1] = MessageBuilder.remove_images_from_message(context[-1])
 
         # Execute action
         try:
             result = self.action_handler.execute(
-                action, screenshot.width, screenshot.height
+                action, screen_width, screen_height,
+                screen_width, screen_height  # Assume no resizing for now
             )
         except Exception as e:
             if self.agent_config.verbose:
                 traceback.print_exc()
             result = self.action_handler.execute(
-                finish(message=str(e)), screenshot.width, screenshot.height
+                finish(message=str(e)), screen_width, screen_height,
+                screen_width, screen_height
             )
 
         # Add assistant response to context
-        self._context.append(
+        context.append(
             MessageBuilder.create_assistant_message(
                 f"<think>{response.thinking}</think><answer>{response.action}</answer>"
             )
         )
-        format_model_output = deepcopy(self._context[-1])
-
-        # Log this step
-        if self.trace_logger and self._current_task_id:
-            self.trace_logger.log_step(
-                screenshot_base64=screenshot.base64_data,
-                model_input=self._context[:-1],  # Context before assistant response
-                model_output=response.action,
-                thinking=response.thinking,
-                action=action,
-                current_app=current_app,
-                screen_width=screenshot.width,
-                screen_height=screenshot.height,
-                raw_model_output=response.raw_content,
-                format_model_output=format_model_output,
-            )
 
         # Check if finished
         finished = action.get("_metadata") == "finish" or result.should_finish
@@ -292,10 +222,6 @@ class PhoneAgent:
             )
             print("=" * 50 + "\n")
 
-            # Show trace location if logging is enabled
-            if self.trace_logger and self._current_task_id:
-                print(f"📊 Trace saved: {self.trace_logger.task_dir.absolute()}")
-
         return StepResult(
             success=result.success,
             finished=finished,
@@ -304,10 +230,9 @@ class PhoneAgent:
             message=result.message or action.get("message"),
         )
 
-    @property
-    def context(self) -> list[dict[str, Any]]:
-        """Get the current conversation context."""
-        return self._context.copy()
+    def reset(self) -> None:
+        """Reset the agent state for a new task."""
+        self._step_count = 0
 
     @property
     def step_count(self) -> int:
