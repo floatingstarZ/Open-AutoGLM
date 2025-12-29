@@ -1,0 +1,7 @@
+{
+  "return_type": "tool_use",
+  "name": "Launch",
+  "input": {
+    "package_name": "com.taobao.taobao"
+  }
+}
