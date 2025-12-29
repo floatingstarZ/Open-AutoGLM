@@ -620,6 +620,14 @@ def main():
         while True:
             try:
                 task = input("Enter your task: ").strip()
+                ##########
+                # judge 中断
+                if type(task) == dict and 'status' in task and task['status'] == 'interrupted_by_judge':
+                    print('=' * 100)
+                    print(f"Judge interrupted")
+                    print('=' * 100)
+                ##########
+
 
                 if task.lower() in ("quit", "exit", "q"):
                     print("Goodbye!")
