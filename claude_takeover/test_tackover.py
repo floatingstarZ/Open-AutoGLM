@@ -22,13 +22,10 @@ if __name__ == '__main__':
     messages, image_scale = gather_message_from_trace(trace_file, 10, target_width=target_width, history_images_k=10)
     with open('messages.json', 'wt+') as f:
         json.dump(messages, f, ensure_ascii=False, indent=2)
-    claude_messages = current_to_claude(messages, image_scale=image_scale)
-    claude_messages = claude_messages[0:3]
-    
+    # claude_messages = current_to_claude(messages, image_scale=image_scale)
+    # claude_messages = claude_messages[0:3]
     # with open('claude_messages.json', 'wt+') as f:
     #     json.dump(claude_messages, f, ensure_ascii=False, indent=2)
-    with open('claude_messages.json', 'r') as f:
-        claude_messages = json.load(f)
     # 调用Claude API
     model_client = ModelClient(
         api_key=api_key,
@@ -38,7 +35,7 @@ if __name__ == '__main__':
         trace_dir='./traces'
     )
     response = model_client.call_model(
-        context=claude_messages,
+        context=messages,
         screenshot_base64=None,
         current_package_name='',
         user_prompt=task

@@ -157,13 +157,17 @@ class PhoneAgent:
                             # Get trace log (read the last step from trace file)
                             trace_log = self._get_last_trace_log()
 
-                            return json.dumps({
+                            return {
                                 "status": "interrupted_by_judge",
-                                "trace_log": trace_log,
+                                "last_trace_log": trace_log,
                                 "judge_result": judge_result,
                                 "step_count": self._step_count,
-                                "trace_dir": str(self.trace_logger.task_dir.absolute()) if self.trace_logger else None
-                            }, ensure_ascii=False)
+                                "trace_dir": str(self.trace_logger.task_dir.absolute()) if self.trace_logger else None,
+                                "trace_file": str(self.trace_logger.trace_file.absolute()) if self.trace_logger else None,
+                                'current_task_id': self._current_task_id,
+                                "context": self._context,
+                                "screenshot_width": self._screenshot_width,
+                                "screenshot_height": self._screenshot_height}
 
             # Max steps reached
             if self.trace_logger:

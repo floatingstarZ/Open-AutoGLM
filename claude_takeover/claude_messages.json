@@ -22,11 +22,11 @@
       {
         "type": "thinking",
         "thinking": "用户想要在蜜雪冰城（西罗园店）点四杯奶昔。我需要：\n1. 打开外卖应用（美团或饿了么）\n2. 搜索蜜雪冰城（西罗园店）\n3. 找到奶昔商品\n4. 下单4杯\n\n从屏幕上看，我可以看到\"美团\"和\"美团外卖\"两个应用。我应该使用\"美团\"或\"饿了么\"。根据允许的应用列表，我可以使用\"美团\"。\n\n让我先启动美团应用。",
-        "signature": "984b6fb0-abfd-4886-87c0-e12e2e36d07e"
+        "signature": "ba7063dd-2097-4437-9f0c-8bdaaf79fcfe"
       },
       {
         "type": "tool_use",
-        "id": "toolu_bdrk_KLGFF7q7jtvTepqpPMZH2v0-s",
+        "id": "toolu_bdrk_dXSUe7ITR2Bmz5WK7-F2EUPNO",
         "name": "Launch",
         "input": {
           "app": "美团"
@@ -38,13 +38,9 @@
     "role": "user",
     "content": [
       {
-        "tool_use_id": "toolu_bdrk_KLGFF7q7jtvTepqpPMZH2v0-s",
+        "tool_use_id": "toolu_bdrk_dXSUe7ITR2Bmz5WK7-F2EUPNO",
         "type": "tool_result",
         "content": [
-          {
-            "type": "text",
-            "text": "Launched 美团"
-          },
           {
             "type": "text",
             "text": "** Screen Info **\n\n{\"current_app\": \"美团\"}"
