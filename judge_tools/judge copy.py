@@ -810,13 +810,32 @@ def judge_model_output(
     if scaled_w is None or scaled_h is None:
         _, scaled_w, scaled_h = load_image_as_base64(screenshot_path, scaled_width, scaled_height)
         
-    converted_messages = current_relative_to_absolute(messages, image_scale=[scaled_w, scaled_h])
+    converted_messages = current_relative_to_absolute(format_model_output, image_scale=[scaled_w, scaled_h])
     messages = converted_messages
+    
+    # # 转换format_model_output中的相对坐标到绝对坐标（基于缩放后的图片尺寸）
+    # converted_format_model_output = format_model_output
+    # if format_model_output and format_model_output.get("role") == "assistant" and scaled_w and scaled_h:
+    #     try:
+    #         content = format_model_output.get("content", "")
+    #         if isinstance(content, str):
+    #             # 创建一个临时的assistant消息用于转换
+    #             temp_messages = [{"role": "assistant", "content": content}]
+    #             # 使用缩放后的图片尺寸进行坐标转换（相对坐标0-999 -> 绝对坐标）
+    #             converted_temp = current_relative_to_absolute(temp_messages, image_scale=[scaled_w, scaled_h])
+    #             if converted_temp and len(converted_temp) > 0:
+    #                 converted_format_model_output = format_model_output.copy()
+    #                 converted_format_model_output["content"] = converted_temp[0]["content"]
+    #                 # 更新messages中的assistant消息
+    #                 messages[-1]["content"] = converted_temp[0]["content"]
+    #                 print(f"[INFO] 已将相对坐标转换为绝对坐标（基于缩放尺寸 {scaled_w}x{scaled_h}）")
+    #     except Exception as e:
+    #         print(f"[WARNING] 坐标转换失败: {e}，将使用原始坐标")
 
     # 添加judge请求消息（纯文本，不包含图片）
     judge_user_message = {
         "role": "user",
-        "content": f"请使用Judge工具对上述最后{history_images_k}步的模型输出进行评估，判断这{history_images_k}步是否合理"
+        "content": f"请使用Judge工具对上述最后{history_images_k}步的模型输出进行评估，判断这{history_images_k}步是否合理。请特别注意检查是否存在死循环（3次以上重复相同或相似的动作）。注意：只评估action的合理性，不评估thinking的正确性。如果最后一步不合理，请提供refined_thinking和refined_action来纠正最后一步。"
     }
     messages.append(judge_user_message)
     
