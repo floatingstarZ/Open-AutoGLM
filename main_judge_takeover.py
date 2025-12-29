@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 from urllib.parse import urlparse
+import json
 
 from openai import OpenAI
 
@@ -612,7 +613,28 @@ def main():
     if args.task:
         print(f"\nTask: {args.task}\n")
         result = agent.run(args.task)
-        print(f"\nResult: {result}")
+        print(f"\nResult: {result}\n")
+
+        ##########
+        # judge 中断
+        claude_takeover = False
+        if isinstance(result, dict) and 'status' in result:
+            print(f"Result type: {type(result)}")
+            print(f"Status: {result['status']}")
+            if result['status'] == 'interrupted_by_judge':
+                print('=' * 100)
+                print(f"Judge interrupted")
+                print('=' * 100)
+                claude_takeover = True
+                trace_dir = result['trace_dir']
+                with open(f'{trace_dir}/agent_with_judge_result.json', 'wt+') as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+                    print(f'Save judge result to {trace_dir}/agent_with_judge_result.json')
+        # claude takeover
+        if claude_takeover:
+            print('=' * 100)
+            print(f"Claude takeover")
+            print('=' * 100)
     else:
         # Interactive mode
         print("\nEntering interactive mode. Type 'quit' to exit.\n")
@@ -620,14 +642,6 @@ def main():
         while True:
             try:
                 task = input("Enter your task: ").strip()
-                ##########
-                # judge 中断
-                if type(task) == dict and 'status' in task and task['status'] == 'interrupted_by_judge':
-                    print('=' * 100)
-                    print(f"Judge interrupted")
-                    print('=' * 100)
-                ##########
-
 
                 if task.lower() in ("quit", "exit", "q"):
                     print("Goodbye!")
@@ -636,9 +650,33 @@ def main():
                 if not task:
                     continue
 
-                print()
                 result = agent.run(task)
                 print(f"\nResult: {result}\n")
+                input_continue = input('Press Enter to continue...')
+
+                ##########
+                # judge 中断
+                claude_takeover = False
+                if isinstance(result, dict) and 'status' in result:
+                    print(f"Result type: {type(result)}")
+                    print(f"Status: {result['status']}")
+                    if result['status'] == 'interrupted_by_judge':
+                        print('=' * 100)
+                        print(f"Judge interrupted")
+                        print('=' * 100)
+                        claude_takeover = True
+                        trace_dir = result['trace_dir']
+                        with open(f'{trace_dir}/agent_with_judge_result.json', 'wt+') as f:
+                            json.dump(result, f, ensure_ascii=False, indent=2)
+                            print(f'Save judge result to {trace_dir}/agent_with_judge_result.json')
+                # claude takeover
+                if claude_takeover:
+                    print('=' * 100)
+                    print(f"Claude takeover")
+                    print('=' * 100)
+                    
+                ##########
+
                 agent.reset()
 
             except KeyboardInterrupt:

@@ -9,10 +9,15 @@
 
 Claude格式 (Claude Format):
 - 对话历史列表，通常不包含system消息（system prompt通过API单独传递）
-- user消息: {"role": "user", "content": [
+- user消息（普通）: {"role": "user", "content": [
     {"type": "text", "text": "..."},
     {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
   ]}
+- user消息（tool_result）: {"role": "user", "content": [{
+    "type": "tool_result",
+    "tool_use_id": "toolu_...",
+    "content": [...]
+  }]}
 - assistant消息: {"role": "assistant", "content": [
     {"type": "thinking", "thinking": "...", "signature": "..."},
     {"type": "tool_use", "id": "toolu_...", "name": "Tap", "input": {"coordinate": [x, y]}}
@@ -21,9 +26,11 @@ Claude格式 (Claude Format):
 关键差异:
 1. Claude格式通常不包含system消息
 2. user消息中的image块使用source字段（包含type、media_type、data）
-3. assistant消息中thinking块包含signature字段（base64编码的随机字节）
-4. Claude使用绝对坐标，当前格式使用相对坐标(0-1000)
-5. 坐标转换存在1-2像素的舍入误差（可接受范围）
+3. user消息在tool_use后必须是tool_result类型
+4. assistant消息中thinking块包含signature字段（base64编码的随机字节）
+5. Claude使用绝对坐标，当前格式使用相对坐标(0-1000)
+6. 坐标转换存在1-2像素的舍入误差（可接受范围）
+7. 工具名称: Tap, LongPress, DoubleClick, Swipe, Launch, Type, Wait, Home, Back
 """
 
 import json
@@ -32,9 +39,74 @@ import uuid
 import secrets
 import base64
 from typing import Any, Dict, List, Optional, Tuple
+import os
+from PIL import Image
+import io
 
 
 # ====================== 工具函数 ======================
+
+
+def load_image_as_base64(image_path: str, target_width: int = 512) -> tuple[Optional[str], Optional[int], Optional[int]]:
+    """
+    加载图片，默认缩放（短边缩放到TARGET_WIDTH），并转换为base64
+    
+    Args:
+        image_path: 图片文件路径
+        scaled_width: 目标宽度（None = 使用默认缩放）
+        scaled_height: 目标高度（None = 使用默认缩放）
+    
+    Returns:
+        (Base64编码的图片字符串, 缩放后的宽度, 缩放后的高度)
+    """
+    try:
+        # 如果是相对路径，尝试从traces目录查找
+        if not os.path.isabs(image_path):
+            # 尝试从当前工作目录或traces目录查找
+            possible_paths = [
+                image_path,
+                os.path.join("traces", image_path),
+                os.path.join(os.getcwd(), "traces", image_path),
+            ]
+            found = False
+            for path in possible_paths:
+                if os.path.exists(path):
+                    image_path = path
+                    found = True
+                    break
+            if not found:
+                raise FileNotFoundError(f"Image file not found: {image_path}")
+        
+        with Image.open(image_path) as img:
+            # 转换为RGB模式（如果需要）
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            # 获取原始尺寸
+            width, height = img.size
+
+            # 缩放图片
+            if target_width is not None and target_width > 0:
+                if width < height:
+                    new_width = target_width
+                    new_height = int(height * (target_width / width))
+                else:
+                    new_height = target_width
+                    new_width = int(width * (target_width / height))
+            else:   
+                new_width, new_height = width, height
+            
+            img = img.resize((new_width, new_height), Image.LANCZOS)
+
+            # 转换为base64
+            buffer = io.BytesIO()
+            img.save(buffer, format='PNG')
+            b64_code = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+            return b64_code, new_width, new_height
+    except Exception as e:
+        print(f"[ERROR] Failed to load image {image_path}: {e}")
+        return None, None, None
 
 def _generate_tool_use_id() -> str:
     """
@@ -50,15 +122,133 @@ def _generate_tool_use_id() -> str:
 
 def _generate_thinking_signature() -> str:
     """
-    生成 thinking 的 signature，格式为base64编码的随机字节
+    生成 thinking 的 signature，格式为 UUID 字符串
 
     返回一个类似于Claude API返回的signature字符串
+    示例: "5e59f452-56b7-4dfa-902a-a1c716a6dae4"
     """
-    # 生成一个较长的随机signature（大约400个字符的base64字符串）
-    random_bytes = secrets.token_bytes(300)
-    signature = base64.b64encode(random_bytes).decode('utf-8')
-    # signature = str(uuid.uuid4())
-    return signature
+    return str(uuid.uuid4())
+
+
+def _ensure_image_format_claude(content: Any) -> Any:
+    """
+    确保 image 块符合 Claude 格式（有 source 嵌套）
+
+    Args:
+        content: user 消息的 content（可能是列表或其他类型）
+
+    Returns:
+        转换后的 content
+    """
+    if not isinstance(content, list):
+        return content
+
+    result = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "image":
+                # 确保有 source 字段
+                if "source" not in item and "data" in item:
+                    # 转换为 Claude 格式
+                    result.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": item.get("media_type", "image/png"),
+                            "data": item.pop("data")
+                        }
+                    })
+                else:
+                    result.append(item)
+            elif item.get("type") == "tool_result":
+                # 递归处理 tool_result 内部的 content
+                if "content" in item:
+                    item["content"] = _ensure_image_format_claude(item["content"])
+                result.append(item)
+            else:
+                result.append(item)
+        else:
+            result.append(item)
+
+    return result
+
+
+def _ensure_image_format_current(content: Any) -> Any:
+    """
+    确保 image 块符合 Current 格式（可以是简化版本）
+
+    Args:
+        content: user 消息的 content
+
+    Returns:
+        转换后的 content
+    """
+    if not isinstance(content, list):
+        return content
+
+    result = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "image":
+                # 如果有 source 嵌套，可以选择保留或展开
+                # 这里选择保留 Claude 格式，因为它更标准
+                result.append(item)
+            elif item.get("type") == "tool_result":
+                # 递归处理 tool_result 内部的 content
+                if "content" in item:
+                    item["content"] = _ensure_image_format_current(item["content"])
+                result.append(item)
+            else:
+                result.append(item)
+        else:
+            result.append(item)
+
+    return result
+
+
+def _update_screenshot_dimensions(content: Any, new_width: int, new_height: int) -> Any:
+    """
+    更新 system-reminder 中的截图尺寸信息
+
+    Args:
+        content: user 消息的 content
+        new_width: 新的宽度
+        new_height: 新的高度
+
+    Returns:
+        更新后的 content
+    """
+    if not isinstance(content, list):
+        return content
+
+    import re
+
+    result = []
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "text":
+                text = item.get("text", "")
+                if "Screenshot dimensions:" in text:
+                    # 替换尺寸信息
+                    text = re.sub(
+                        r'Screenshot dimensions: \(\d+x\d+, png\)',
+                        f'Screenshot dimensions: ({new_width}x{new_height}, png)',
+                        text
+                    )
+                    result.append({"type": "text", "text": text})
+                else:
+                    result.append(item)
+            elif item.get("type") == "tool_result":
+                # 递归处理 tool_result 内部的 content
+                if "content" in item:
+                    item["content"] = _update_screenshot_dimensions(item["content"], new_width, new_height)
+                result.append(item)
+            else:
+                result.append(item)
+        else:
+            result.append(item)
+
+    return result
 
 
 def _scale_coordinates_in_text(text: str, scale_x: float, scale_y: float) -> str:
@@ -194,9 +384,9 @@ def _scale_action_coordinates(action: Dict[str, Any], scale_x: float = 1.0, scal
         return action
 
     action_type = action.get("action", "")
-    
-    # 转换坐标字段
-    if action_type in ["Tap", "Long Press", "Double Tap"]:
+
+    # 转换坐标字段（支持多种工具名称格式）
+    if action_type in ["Tap", "LongPress", "Long Press", "DoubleClick", "Double Tap", "Double Click"]:
         if "element" in action:
             element = action["element"]
             scaled_element = [
@@ -226,7 +416,7 @@ def _scale_action_coordinates(action: Dict[str, Any], scale_x: float = 1.0, scal
 
 def current_to_claude(
     messages: List[Dict[str, Any]],
-    claude_image_scale: Optional[List[int]] = None
+    image_scale: Optional[List[int]] = None
 ) -> List[Dict[str, Any]]:
     """
     将当前格式的对话历史转换为Claude格式
@@ -255,11 +445,11 @@ def current_to_claude(
     # relative_to_absolute: absolute = relative / 1000 * image_size
     scale_x = 1.0
     scale_y = 1.0
-    if claude_image_scale:
-        scale_x = claude_image_scale[0] / 1000.0
-        scale_y = claude_image_scale[1] / 1000.0
+    if image_scale:
+        scale_x = image_scale[0] / 1000.0
+        scale_y = image_scale[1] / 1000.0
 
-    for msg in messages:
+    for i, msg in enumerate(messages):
         role = msg.get("role")
         content = msg.get("content")
 
@@ -271,11 +461,59 @@ def current_to_claude(
             })
 
         elif role == "user":
-            # user消息保持不变（已经是正确格式）
-            claude_messages.append({
-                "role": "user",
-                "content": content
-            })
+            # 检查前一条是否是 assistant 的 tool_use
+            should_be_tool_result = False
+            tool_use_id = None
+
+            if i > 0 and claude_messages:
+                last_msg = claude_messages[-1]
+                if last_msg.get("role") == "assistant":
+                    assistant_content = last_msg.get("content", [])
+                    # 检查是否包含 tool_use
+                    for block in assistant_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            should_be_tool_result = True
+                            tool_use_id = block.get("id")
+                            break
+
+            if should_be_tool_result and tool_use_id:
+                # 这应该是 tool_result 消息
+                # 确保 image 格式正确
+                converted_content = _ensure_image_format_claude(content)
+
+                # 如果需要缩放，更新 Screenshot dimensions
+                if image_scale:
+                    converted_content = _update_screenshot_dimensions(
+                        converted_content,
+                        image_scale[0],
+                        image_scale[1]
+                    )
+
+                claude_messages.append({
+                    "role": "user",
+                    "content": [{
+                        "tool_use_id": tool_use_id,
+                        "type": "tool_result",
+                        "content": converted_content
+                    }]
+                })
+            else:
+                # 普通 user 消息
+                # 确保 image 格式正确
+                converted_content = _ensure_image_format_claude(content)
+
+                # 如果需要缩放，更新 Screenshot dimensions
+                if image_scale:
+                    converted_content = _update_screenshot_dimensions(
+                        converted_content,
+                        image_scale[0],
+                        image_scale[1]
+                    )
+
+                claude_messages.append({
+                    "role": "user",
+                    "content": converted_content
+                })
 
         elif role == "assistant":
             # 解析assistant消息并转换为Claude格式
@@ -338,11 +576,50 @@ def claude_to_current(
             })
 
         elif role == "user":
-            # user消息保持不变
-            current_messages.append({
-                "role": "user",
-                "content": content
-            })
+            # 检查是否是 tool_result 消息
+            if isinstance(content, list) and len(content) > 0:
+                first_block = content[0]
+                if isinstance(first_block, dict) and first_block.get("type") == "tool_result":
+                    # 这是 tool_result 消息，提取内部的 content
+                    tool_result_content = first_block.get("content", [])
+
+                    # 确保 image 格式正确
+                    converted_content = _ensure_image_format_current(tool_result_content)
+
+                    # 如果需要缩放，更新 Screenshot dimensions
+                    if claude_image_scale:
+                        converted_content = _update_screenshot_dimensions(
+                            converted_content,
+                            1000,  # Current 格式固定用 1000
+                            1000
+                        )
+
+                    current_messages.append({
+                        "role": "user",
+                        "content": converted_content
+                    })
+                else:
+                    # 普通 user 消息
+                    converted_content = _ensure_image_format_current(content)
+
+                    # 如果需要缩放，更新 Screenshot dimensions
+                    if claude_image_scale:
+                        converted_content = _update_screenshot_dimensions(
+                            converted_content,
+                            1000,
+                            1000
+                        )
+
+                    current_messages.append({
+                        "role": "user",
+                        "content": converted_content
+                    })
+            else:
+                # 保持不变
+                current_messages.append({
+                    "role": "user",
+                    "content": content
+                })
 
         elif role == "assistant":
             # 转换Claude格式的assistant消息为当前格式
@@ -560,13 +837,22 @@ def _parse_assistant_to_claude(content: str, scale_x: float = 1.0, scale_y: floa
                 action_type = action.get("action", "")
                 tool_input = {}
 
-                # 转换坐标字段名（坐标已经在上面转换过了）
-                if action_type in ["Tap", "Long Press", "Double Tap"]:
+                # 转换坐标字段名并处理特殊字段（坐标已经在上面转换过了）
+                if action_type == "Tap":
                     if "element" in action:
                         tool_input["coordinate"] = action["element"]
-                    # 如果有message字段，也加入input
-                    if "message" in action:
-                        tool_input["message"] = action["message"]
+                elif action_type in ["Long Press", "LongPress"]:
+                    # 统一转换为 LongPress
+                    action_type = "LongPress"
+                    if "element" in action:
+                        tool_input["coordinate"] = action["element"]
+                    # LongPress 必须有 duration 字段
+                    tool_input["duration"] = action.get("duration", 2.0)
+                elif action_type in ["Double Tap", "DoubleClick", "Double Click"]:
+                    # 统一转换为 DoubleClick
+                    action_type = "DoubleClick"
+                    if "element" in action:
+                        tool_input["coordinate"] = action["element"]
                 elif action_type == "Swipe":
                     if "start" in action and "end" in action:
                         tool_input["start_coordinate"] = action["start"]
@@ -630,7 +916,7 @@ def _parse_claude_to_assistant(content: Any, scale_x: float = 1.0, scale_y: floa
             }
 
             # 转换坐标字段名并缩放坐标
-            if tool_name in ["Tap", "Long Press", "Double Tap"]:
+            if tool_name == "Tap":
                 if "coordinate" in tool_input:
                     coordinate = tool_input["coordinate"]
                     # 缩放坐标
@@ -639,8 +925,27 @@ def _parse_claude_to_assistant(content: Any, scale_x: float = 1.0, scale_y: floa
                         int(coordinate[1] * scale_y)
                     ]
                     action["element"] = scaled_element
-                if "message" in tool_input:
-                    action["message"] = tool_input["message"]
+            elif tool_name == "LongPress":
+                if "coordinate" in tool_input:
+                    coordinate = tool_input["coordinate"]
+                    # 缩放坐标
+                    scaled_element = [
+                        int(coordinate[0] * scale_x),
+                        int(coordinate[1] * scale_y)
+                    ]
+                    action["element"] = scaled_element
+                # 保留 duration 字段
+                if "duration" in tool_input:
+                    action["duration"] = tool_input["duration"]
+            elif tool_name == "DoubleClick":
+                if "coordinate" in tool_input:
+                    coordinate = tool_input["coordinate"]
+                    # 缩放坐标
+                    scaled_element = [
+                        int(coordinate[0] * scale_x),
+                        int(coordinate[1] * scale_y)
+                    ]
+                    action["element"] = scaled_element
             elif tool_name == "Swipe":
                 if "start_coordinate" in tool_input and "end_coordinate" in tool_input:
                     start_coordinate = tool_input["start_coordinate"]
@@ -919,57 +1224,121 @@ def unit_test_claude():
         print(f"  结果: {result}")
         print()
 
-if __name__ == "__main__":
-    # unit_test_claude()
-    with open("/Users/huangziyue/Open-AutoGLM/traces/task_20251224_1447/trace.jsonl", "r") as f:
+def gather_message_from_trace(
+    trace_file: str, 
+    step_index: int, 
+    history_images_k: int = 5,
+    target_width: int = 512,
+) -> List[Dict[str, Any]]:
+    """
+    从trace文件中收集消息，并为最后k个user消息添加对应的截图
+    
+    Args:
+        trace_file: trace文件路径
+        step_index: 步骤索引
+        history_images_k: 为最近的K个user message添加截图（包括当前步骤，默认5）
+        target_width: 图片缩放宽度（默认512）
+    
+    Returns:
+        消息列表（排除system消息，为最后k个user消息添加截图）
+    """
+    import os
+    
+    with open(trace_file, "r") as f:
         lines = f.readlines()
-        # 找到最后一行非空行
-        last_line = None
-        for line in reversed(lines):
-            line = line.strip()
-            if line:
-                last_line = line
-                break
+        step_data = json.loads(lines[step_index - 1])
+        model_input = step_data.get("model_input", [])
+        screen_size = step_data.get("screen_size", {})
+        screenshot_path = step_data.get("screenshot_path", "")
+
+    if not model_input:
+        raise ValueError(f"Step {step_index} not found in trace file or model_input is empty")
+    
+    # 构建消息列表（排除system消息）
+    messages = []
+    for msg in model_input:
+        role = msg.get("role")
+        if role == "system":
+            continue  # 排除system消息
+        messages.append(msg.copy())
+    
+    # 加载截图映射
+    screenshots_map = {}
+    try:
+        with open(trace_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
         
-        if last_line:
-            data = json.loads(last_line)
-            model_input = data.get("model_input", [])
-            screen_size = data.get("screen_size", {})
-            
-            # 获取图像分辨率用于坐标转换
-            claude_image_scale = None
-            if screen_size:
-                claude_image_scale = [screen_size.get("width", 1000), screen_size.get("height", 1000)]
-            
-            # # 转换为Claude格式
-            # claude_messages = current_to_claude(model_input, claude_image_scale=claude_image_scale)
-            
-            # # 打印转换结果
-            # print(json.dumps(claude_messages, ensure_ascii=False, indent=2))
+        for line in lines:
+            try:
+                step_data = json.loads(line.strip())
+                if step_data.get("type") == "step":
+                    idx = step_data.get("step_index")
+                    path = step_data.get("screenshot_path")
+                    if idx and path and idx <= step_index:
+                        screenshots_map[idx] = path
+            except json.JSONDecodeError:
+                continue
+    except Exception as e:
+        print(f"[WARNING] Failed to load screenshots mapping: {e}")
+    
+    # 计算要添加截图的起始步骤（只为最近的K个步骤添加截图）
+    start_step = max(1, step_index - history_images_k + 1)
+    
+    # 获取trace的根目录
+    trace_dir = os.path.dirname(trace_file)
+    trace_root = os.path.dirname(trace_dir) if trace_dir else os.getcwd()
+    
+    # 提取步骤索引的辅助函数
+    def extract_step_index_from_screenshot_path(path: str) -> Optional[int]:
+        """从screenshot路径中提取step_index"""
+        import re
+        match = re.search(r'step_(\d+)\.png', path)
+        if match:
+            return int(match.group(1))
+        return None
+    
+    # 遍历messages，为符合条件的user message添加对应的截图
+    user_msg_index = 0
+    image_scale = None
+    for msg in messages:
+        if msg.get("role") == "user":
+            user_msg_index += 1
+            # 只为最近的K个步骤添加截图
+            if user_msg_index >= start_step and user_msg_index in screenshots_map:
+                screenshot_rel_path = screenshots_map[user_msg_index]
+                screenshot_full_path = os.path.join(trace_root, screenshot_rel_path)
+                screenshot_base64, new_width, new_height = load_image_as_base64(screenshot_full_path, target_width)
+                if image_scale is None:
+                    image_scale = [new_width, new_height]
+                    print(f"Image scale: {image_scale}")
+                if screenshot_base64:
+                    # 确保content是列表格式
+                    content = msg.get("content", [])
+                    if isinstance(content, str):
+                        content = [{"type": "text", "text": content}]
+                    elif not isinstance(content, list):
+                        content = [{"type": "text", "text": str(content)}]
+                    
+                    # 添加图片到user message（使用 Claude 格式）
+                    content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": screenshot_base64
+                        }
+                    })
+                    msg["content"] = content
+    
+    return messages, image_scale
 
-            # # 转换坐标为绝对坐标
-            absolute_messages = current_relative_to_absolute(model_input, image_scale=claude_image_scale)
-            # print(json.dumps(absolute_messages, ensure_ascii=False, indent=2))
 
-            # 转换坐标为相对坐标
-            relative_messages = current_absolute_to_relative(absolute_messages, image_scale=claude_image_scale)
-            # print(json.dumps(relative_messages, ensure_ascii=False, indent=2))
 
-            # # 验证往返转换的精度
-            # for i, (orig, conv) in enumerate(zip(model_input, relative_messages)):
-            #     print(f"消息 {i}:")
-            #     print('-'*100)
-            #     print(f"  原始: {orig['content']}")
-            #     print(f"  转换: {conv['content']}")
-            #     print('-'*100)
-            #     print()
-            # 对比转换前后
-            for i, (orig, conv) in enumerate(zip(model_input, absolute_messages)):
-                print(f"消息 {i}:")
-                print('-'*100)
-                print(f"  原始: {orig['content']}")
-                print(f"  转换: {conv['content']}")
-                print('-'*100)
-                print()
-        else:
-            print("未找到有效的最后一行")
+if __name__ == "__main__":
+    trace_file = "/Users/huangziyue/Open-AutoGLM/traces/task_20251229_1056/trace.jsonl"
+    mssages, image_scale = gather_message_from_trace(trace_file, 10)
+    with open('messages.json', 'wt+') as f:
+        json.dump(mssages, f, ensure_ascii=False, indent=2)
+    claude_messages = current_to_claude(mssages, image_scale=image_scale)
+    with open('claude_messages.json', 'wt+') as f:
+        json.dump(claude_messages, f, ensure_ascii=False, indent=2)
