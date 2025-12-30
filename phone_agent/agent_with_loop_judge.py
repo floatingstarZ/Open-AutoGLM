@@ -16,6 +16,7 @@ from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.model.client import MessageBuilder
 from phone_agent.trace_logger import TraceLogger, get_trace_logger
 from judge_tools.judge import judge_model_output
+from judge_tools.convert_format import current_absolute_to_relative
 
 
 @dataclass
@@ -30,7 +31,7 @@ class AgentConfig:
     enable_trace_logging: bool = True
     trace_root: str | None = None
     # judge related
-    judge_check_interval: int = 20  # 每K步judge一次，0表示禁用
+    judge_check_interval: int = 10  # 每K步judge一次，0表示禁用
     enable_periodic_judge: bool = True  # 是否启用定期judge
     target_width: int = 512 # 图片缩放的目标宽度（短边）
 
@@ -144,31 +145,6 @@ class PhoneAgent:
                         self.trace_logger.reset()
                     return final_message
 
-                # Perform periodic judge check
-                if self.agent_config.enable_periodic_judge and self.agent_config.judge_check_interval > 0:
-                    if self._step_count % self.agent_config.judge_check_interval == 0:
-                        judge_result = self._perform_judge_check()
-                        if judge_result is not None:
-                            # Judge failed, interrupt and return trace_log with judge result
-                            if self.agent_config.verbose:
-                                print("\n⚠️  Judge check failed, interrupting execution...")
-                                print(f"📊 Trace saved: {self.trace_logger.task_dir.absolute()}")
-
-                            # Get trace log (read the last step from trace file)
-                            trace_log = self._get_last_trace_log()
-
-                            return {
-                                "status": "interrupted_by_judge",
-                                "last_trace_log": trace_log,
-                                "judge_result": judge_result,
-                                "step_count": self._step_count,
-                                "trace_dir": str(self.trace_logger.task_dir.absolute()) if self.trace_logger else None,
-                                "trace_file": str(self.trace_logger.trace_file.absolute()) if self.trace_logger else None,
-                                'current_task_id': self._current_task_id,
-                                "context": self._context,
-                                "screenshot_width": self._screenshot_width,
-                                "screenshot_height": self._screenshot_height}
-
             # Max steps reached
             if self.trace_logger:
                 self.trace_logger.reset()
@@ -207,18 +183,22 @@ class PhoneAgent:
         self._step_count = 0
         self._current_task_id = None
 
-    def _execute_step(
+    def _get_model_inference(
         self, user_prompt: str | None = None, is_first: bool = False
-    ) -> StepResult:
-        """Execute a single step of the agent loop."""
-        self._step_count += 1
+    ) -> tuple[Any, Any, Any]:
+        """
+        模型推理部分：获取模型输出
 
+        Returns:
+            (screenshot, current_app, response) 元组
+        """
         # Capture current screen state
         device_factory = get_device_factory()
         screenshot = device_factory.get_screenshot(self.agent_config.device_id)
         current_app = device_factory.get_current_app(self.agent_config.device_id)
         self._screenshot_width = screenshot.width
         self._screenshot_height = screenshot.height
+
         # Build messages
         if is_first:
             self._context.append(
@@ -244,41 +224,49 @@ class PhoneAgent:
             )
 
         # Get model response
-        try:
-            msgs = get_messages(self.agent_config.lang)
-            print("\n" + "=" * 50)
-            print(f"💭 {msgs['thinking']}:")
-            print("-" * 50)
-            response = self.model_client.request(self._context)
-        except Exception as e:
-            if self.agent_config.verbose:
-                traceback.print_exc()
-            return StepResult(
-                success=False,
-                finished=True,
-                action=None,
-                thinking="",
-                message=f"Model error: {e}",
-            )
+        msgs = get_messages(self.agent_config.lang)
+        print("\n" + "=" * 50)
+        print(f"💭 {msgs['thinking']}:")
+        print("-" * 50)
+        response = self.model_client.request(self._context)
 
+        # Remove image from context to save space
+        self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
+
+        return screenshot, current_app, response
+
+    def _execute_action(
+        self,
+        screenshot: Any,
+        current_app: str,
+        thinking: str,
+        action_str: str,
+        raw_model_output: str = None
+    ) -> StepResult:
+        """
+        执行动作部分：解析并执行action，更新context和trace
+
+        Args:
+            screenshot: 截图对象
+            current_app: 当前应用
+            thinking: 思考内容
+            action_str: 动作字符串
+            raw_model_output: 原始模型输出（可选）
+        """
         # Parse action from response
         try:
-            action = parse_action(response.action)
+            action = parse_action(action_str)
         except ValueError:
             if self.agent_config.verbose:
                 traceback.print_exc()
-            action = finish(message=response.action)
+            action = finish(message=action_str)
 
         if self.agent_config.verbose:
-            # Print thinking process
+            msgs = get_messages(self.agent_config.lang)
             print("-" * 50)
             print(f"🎯 {msgs['action']}:")
             print(json.dumps(action, ensure_ascii=False, indent=2))
             print("=" * 50 + "\n")
-
-        # Remove image from context to save space
-        raw_model_input = deepcopy(self._context)
-        self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
 
         # Execute action
         try:
@@ -295,7 +283,7 @@ class PhoneAgent:
         # Add assistant response to context
         self._context.append(
             MessageBuilder.create_assistant_message(
-                f"<think>{response.thinking}</think><answer>{response.action}</answer>"
+                f"<think>{thinking}</think><answer>{action_str}</answer>"
             )
         )
         format_model_output = deepcopy(self._context[-1])
@@ -304,14 +292,14 @@ class PhoneAgent:
         if self.trace_logger and self._current_task_id:
             self.trace_logger.log_step(
                 screenshot_base64=screenshot.base64_data,
-                model_input=self._context[:-1],  # Context before assistant response
-                model_output=response.action,
-                thinking=response.thinking,
+                model_input=self._context[:-1],
+                model_output=action_str,
+                thinking=thinking,
                 action=action,
                 current_app=current_app,
                 screen_width=screenshot.width,
                 screen_height=screenshot.height,
-                raw_model_output=response.raw_content,
+                raw_model_output=raw_model_output or f"<think>{thinking}</think><answer>{action_str}</answer>",
                 format_model_output=format_model_output,
             )
 
@@ -334,9 +322,87 @@ class PhoneAgent:
             success=result.success,
             finished=finished,
             action=action,
-            thinking=response.thinking,
+            thinking=thinking,
             message=result.message or action.get("message"),
         )
+
+    def _execute_step(
+        self, user_prompt: str | None = None, is_first: bool = False
+    ) -> StepResult:
+        """Execute a single step of the agent loop."""
+        self._step_count += 1
+
+        try:
+            # 1. 模型推理
+            screenshot, current_app, response = self._get_model_inference(user_prompt, is_first)
+
+            # 2. Judge检查（每K步检查一次）
+            thinking = response.thinking
+            action_str = response.action
+            raw_output = response.raw_content
+
+            should_judge = (
+                self.agent_config.enable_periodic_judge and
+                self.agent_config.judge_check_interval > 0 and
+                self._step_count % self.agent_config.judge_check_interval == 0
+            )
+            print(f'Step {self._step_count} should_judge: {should_judge}')
+
+            if should_judge:
+                # 执行judge
+                judge_result = self._perform_judge_check_with_output(
+                    screenshot, thinking, action_str
+                )
+
+                if judge_result is not None:
+                    # Judge失败，使用repair的输出
+                    if self.agent_config.verbose:
+                        print("\n🔧 Judge failed, using repair action")
+                        print(f"   Repair: {judge_result.get('repair', 'No suggestions')}")
+
+                    refined = judge_result.get("refined", "")
+                    if refined:
+                        # 解析refined
+                        import re
+                        think_match = re.search(r'<think>(.*?)</think>', refined, re.DOTALL)
+                        answer_match = re.search(r'<answer>(.*?)</answer>', refined, re.DOTALL)
+
+                        if answer_match:
+                            thinking = think_match.group(1).strip() if think_match else thinking
+                            action_str_absolute = answer_match.group(1).strip()
+
+                            # 坐标转换：绝对 -> 相对
+                            absolute_msg = [{
+                                "role": "assistant",
+                                "content": f"<think>{thinking}</think><answer>{action_str_absolute}</answer>"
+                            }]
+                            relative_msg = current_absolute_to_relative(
+                                absolute_msg,
+                                image_scale=[screenshot.width, screenshot.height]
+                            )
+
+                            # 提取转换后的action
+                            relative_content = relative_msg[0]["content"]
+                            answer_match = re.search(r'<answer>(.*?)</answer>', relative_content, re.DOTALL)
+                            if answer_match:
+                                action_str = answer_match.group(1).strip()
+                                raw_output = f"<think>{thinking}</think><answer>{action_str}</answer>"
+                                if self.agent_config.verbose:
+                                    print(f"   Using repair action: {action_str}")
+
+            # 3. 执行动作
+            return self._execute_action(screenshot, current_app, thinking, action_str, raw_output)
+
+        except Exception as e:
+            if self.agent_config.verbose:
+                traceback.print_exc()
+            return StepResult(
+                success=False,
+                finished=True,
+                action=None,
+                thinking="",
+                message=f"Error: {e}",
+            )
 
     @property
     def context(self) -> list[dict[str, Any]]:
@@ -378,12 +444,22 @@ class PhoneAgent:
                 print(f"[WARNING] Failed to get last trace log: {e}")
             return None
 
-    def _perform_judge_check(self) -> dict[str, Any] | None:
+    def _perform_judge_check_with_output(
+        self,
+        screenshot: Any,
+        thinking: str,
+        action_str: str
+    ) -> dict[str, Any] | None:
         """
-        Perform judge check on current step.
+        使用当前模型输出执行judge检查
+
+        Args:
+            screenshot: 截图对象
+            thinking: 思考内容
+            action_str: 动作字符串
 
         Returns:
-            Judge result if verdict is False, None if verdict is True or judge is disabled.
+            Judge result if verdict is False, None if verdict is True
         """
         if not self.agent_config.enable_periodic_judge:
             return None
@@ -393,69 +469,69 @@ class PhoneAgent:
                 print("[WARNING] Judge check skipped: trace logging not enabled")
             return None
 
-        # Get trace file path and current screenshot path
-        trace_file_path = str(self.trace_logger.trace_file)
-        screenshot_path = str(self.trace_logger.task_dir / f"step_{self._step_count}.png")
-
-        # Read trace file to get the last step data
         try:
-            with open(trace_file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+            # 准备judge需要的数据
+            model_input = self._context.copy()  # 不包含最后的assistant response
+            format_model_output = {
+                "role": "assistant",
+                "content": f"<think>{thinking}</think><answer>{action_str}</answer>"
+            }
 
-            # Find the last step record
-            last_step_data = None
-            for line in reversed(lines):
-                try:
-                    data = json.loads(line.strip())
-                    if data.get("type") == "step":
-                        last_step_data = data
-                        break
-                except json.JSONDecodeError:
-                    continue
-
-            if not last_step_data:
-                if self.agent_config.verbose:
-                    print("[WARNING] Judge check skipped: no step data found in trace")
-                return None
-
-            model_input = last_step_data.get("model_input", [])
-            format_model_output = last_step_data.get("format_model_output", {})
-
-            if self.agent_config.verbose:
-                msgs = get_messages(self.agent_config.lang)
-                print(f"\n🔍 Performing judge check at step {self._step_count}...")
-
-            # Call judge_model_output
-            # 默认缩放：短边缩放到TARGET_WIDTH，保持宽高比
-            target_width = self.agent_config.target_width   
-            if self._screenshot_width < self._screenshot_height:
+            # 计算缩放尺寸
+            target_width = self.agent_config.target_width
+            if screenshot.width < screenshot.height:
                 new_width = target_width
-                new_height = int(self._screenshot_height * (target_width / self._screenshot_width))
+                new_height = int(screenshot.height * (target_width / screenshot.width))
             else:
                 new_height = target_width
-                new_width = int(self._screenshot_width * (target_width / self._screenshot_height))
-            print(f"Judge使用的图片尺寸: {new_width}x{new_height}")
-            
+                new_width = int(screenshot.width * (target_width / screenshot.height))
+
+            if self.agent_config.verbose:
+                print(f"\n🔍 Performing judge check at step {self._step_count}...")
+                print(f"   Judge使用的图片尺寸: {new_width}x{new_height}")
+
+            # 将screenshot保存到临时文件（judge需要文件路径）
+            import tempfile
+            import base64
+            from PIL import Image
+            import io
+
+            screenshot_data = base64.b64decode(screenshot.base64_data)
+            img = Image.open(io.BytesIO(screenshot_data))
+
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                img.save(tmp.name)
+                screenshot_path = tmp.name
+
+            # 调用judge
             judge_result = judge_model_output(
                 model_input=model_input,
                 screenshot_path=screenshot_path,
                 format_model_output=format_model_output,
-                trace_file_path=trace_file_path,
+                trace_file_path=str(self.trace_logger.trace_file),
                 history_images_k=self.agent_config.judge_check_interval,
                 save_io=True,
                 scaled_width=new_width,
                 scaled_height=new_height,
             )
-            
+
+            # 清理临时文件
+            import os
+            try:
+                os.unlink(screenshot_path)
+            except:
+                pass
 
             verdict = judge_result.get("verdict", True)
+            print('-' * 50)
+            print(f'judge_result: {judge_result}')
+            print('-' * 50)
 
             if self.agent_config.verbose:
                 if verdict:
-                    print(f"✅ Judge: PASS (score: {judge_result.get('model_score', 'N/A')})")
+                    print(f"   ✅ Judge: PASS (score: {judge_result.get('model_score', 'N/A')})")
                 else:
-                    print(f"❌ Judge: FAIL (score: {judge_result.get('model_score', 'N/A')})")
-                    print(f"   Reason: {judge_result.get('repair', 'No suggestions')}")
+                    print(f"   ❌ Judge: FAIL (score: {judge_result.get('model_score', 'N/A')})")
 
             # Return judge result only if verdict is False
             return judge_result if not verdict else None
@@ -465,3 +541,4 @@ class PhoneAgent:
                 print(f"[WARNING] Judge check failed: {e}")
                 traceback.print_exc()
             return None
+
