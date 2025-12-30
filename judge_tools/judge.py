@@ -61,32 +61,13 @@ JUDGE_TOOL = {
         "properties": {
             "verdict": {
                 "type": "boolean",
-                "description": "判断输出是否合理"
+                "description": "判断最后一步输出是否合理（true表示合理，false表示Agent跑偏需要纠正）"
             },
             "scores": {
-                "type": "object",
-                "properties": {
-                    "requirement_satisfaction": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "reasoning_correctness": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "conciseness": {"type": "integer", "minimum": 0, "maximum": 100}
-                },
-                "required": ["requirement_satisfaction", "reasoning_correctness", "conciseness"]
-            },
-            "loop_detected": {
-                "type": "boolean",
-                "description": "是否检测到死循环（3次以上重复相同或相似的动作）"
-            },
-            "failed_steps": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "step_id": {"type": "string"},
-                        "snippet": {"type": "string"},
-                        "why_failed": {"type": "string"}
-                    },
-                    "required": ["step_id", "snippet", "why_failed"]
-                }
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "综合评分 (0-100整数)，评估最后一步动作的整体质量"
             },
             "model_score": {
                 "type": "integer",
@@ -100,162 +81,103 @@ JUDGE_TOOL = {
                 "maximum": 100,
                 "description": "判定的置信度 (0-100整数)"
             },
-            "refined_thinking": {
+            "refined": {
                 "type": "string",
-                "description": "如果判断为不合理(verdict=false)，提供简要的修正思考（1-2句话说明为什么这样做）；如果判断为合理，则返回空字符串"
+                "description": "如果判断为不合理(verdict=false)，提供修正后的完整输出（格式：<think>修正思考</think><answer>修正动作</answer>，动作使用绝对像素坐标）；如果判断为合理，则返回空字符串"
             },
-            "refined_action": {
+            "repair": {
                 "type": "string",
-                "description": "如果判断为不合理(verdict=false)，提供修正后的动作（使用绝对像素坐标，如：do(action=\"Tap\", element=[540, 960])）；如果判断为合理，则返回空字符串"
-            },
-            "repair_suggestions": {
-                "type": "string",
-                "description": "修复建议文本，说明为什么原action不合理以及为什么修正后的action是正确的"
+                "description": "修复建议文本，说明为什么Agent跑偏以及如何纠正"
             }
         },
-        "required": ["verdict", "scores", "loop_detected", "failed_steps", "model_score", "model_confidence", "refined_thinking", "refined_action", "repair_suggestions"]
+        "required": ["verdict", "scores", "model_score", "model_confidence", "refined", "repair"]
     }
 }
 
-JUDGE_PROMPT_TEMPLATE = """你是一个专注于模型执行审计与判定的智能体。
-任务：基于GUIAgent模型的输入和输出，判断该次输出是否**合理**，**必须使用Judge工具返回结构化的判定结果**。
+JUDGE_PROMPT_TEMPLATE = """你是一个Agent执行监督者。你的核心任务是：判断Agent最后一步的执行是否合理，在Agent跑偏时给予可直接执行的纠正动作。
 
---- GUIAgent模型的System Prompt ---
-以下是GUIAgent模型在生成输出时所遵循的system prompt，你需要根据这些规则来评估模型的输出是否符合要求。
-注意：**坐标系统使用绝对像素坐标**
+--- GUIAgent的System Prompt ---
+以下是GUIAgent在生成输出时遵循的system prompt。坐标系统使用**绝对像素坐标**。
 
 <system_prompt>
 {trace_system_prompt}
 </system_prompt>
 
---- 输入说明 ---
-你将看到：
-1. GUIAgent模型的完整对话历史（user和assistant消息交替）
-2. 最近{judge_steps_k}个步骤的user消息包含对应的屏幕截图（从旧到新）
-3. 最后{judge_steps_k}条assistant消息是最近{judge_steps_k}步的模型输出，你需要评估这{judge_steps_k}步是否合理
-4. 通过查看对话历史和截图序列，你可以理解任务的执行过程，检测是否存在死循环或其他问题
+--- 你将看到 ---
+1. GUIAgent的完整对话历史（user和assistant消息交替）
+2. 最近{judge_steps_k}个步骤的屏幕截图（从旧到新）
+3. 最后{judge_steps_k}步的模型输出
 
-**重要：你需要评估最后{judge_steps_k}步的整体合理性，而不仅仅是最后一步。**
+**你需要综合评估最后{judge_steps_k}步的执行情况，判断最后一步是否合理。如果不合理，你的refined输出将直接替换Agent的原输出并立即执行。**
 
---- Judge工具定义 ---
-工具名称: Judge
-描述: 返回模型执行的审计与判定结果
+--- 输出格式要求 ---
+**必须严格按照以下JSON格式输出Judge工具的结果。注意：JSON字符串中的引号必须转义为\\"**
 
-输入参数:
-- verdict (boolean): 判断输出是否合理
-- scores (object): 包含三个评分维度的对象
-  - requirement_satisfaction (integer, 0-100): 需求满足度 - 动作是否满足用户需求
-  - reasoning_correctness (integer, 0-100): 推理正确性 - 固定设置为100（不评估thinking）
-  - conciseness (integer, 0-100): 简洁性 - 动作是否简洁明了
-- loop_detected (boolean): 是否检测到死循环（3次以上重复相同或相似的动作）
-- failed_steps (array): 失败步骤数组，如果没有发现失败步骤，请返回空数组 []。每个元素必须包含：
-  - step_id (string): 步骤标识（应该是 "action"，不评估thinking）
-  - snippet (string): 步骤内容片段（不超过 200 字符）
-  - why_failed (string): 失败原因说明
-- model_score (integer, 0-100): 模型对输出质量的判断分数，表示该输出满足用户需求的程度
-- model_confidence (integer, 0-100): 判定的置信度
-- refined_thinking (string): 如果最后一步判断为不合理(verdict=false)，提供对最后一步的简要修正思考（1-2句话说明为什么这样做）；如果最后一步合理，则返回空字符串。注意：这是对最后一步的纠正，不是对所有失败步骤的纠正。
-- refined_action (string): 如果最后一步判断为不合理(verdict=false)，提供对最后一步的修正后的动作（使用绝对像素坐标，如：do(action="Tap", element=[540, 960])）；如果最后一步合理，则返回空字符串。注意：这是对最后一步的纠正，以让模型返回正常。
-- repair_suggestions (string): 修复建议文本，说明为什么原action不合理以及为什么修正后的action是正确的。可以针对所有失败步骤提供建议。
-
-必需参数: verdict, scores, loop_detected, failed_steps, model_score, model_confidence, refined_thinking, refined_action, repair_suggestions
-
---- 输出格式要求（重要） ---
-**你必须严格按照以下JSON格式输出Judge工具的结果，不要添加任何其他文本或说明！**
-
-输出格式：
 ```json
 {{
   "name": "Judge",
   "arguments": {{
     "verdict": false,
-    "scores": {{
-      "requirement_satisfaction": 60,
-      "reasoning_correctness": 100,
-      "conciseness": 75
-    }},
-    "loop_detected": false,
-    "failed_steps": [
-      {{
-        "step_id": "action",
-        "snippet": "do(action=\\"Tap\\", element=[108, 192])",
-        "why_failed": "点击位置错误，应该点击屏幕中心的按钮"
-      }}
-    ],
+    "scores": 60,
     "model_score": 55,
     "model_confidence": 80,
-    "refined_thinking": "需要点击屏幕中心的按钮。",
-    "refined_action": "do(action=\\"Tap\\", element=[540, 960])",
-    "repair_suggestions": "原action点击了错误的位置[108, 192]（屏幕左上角），该位置没有可交互元素。正确的做法是点击屏幕中心的按钮，像素坐标为[540, 960]。"
+    "refined": "<think>需要点击屏幕中心的按钮来继续任务。</think><answer>do(action=\\"Tap\\", element=[540, 960])</answer>",
+    "repair": "Agent点击了错误的位置，应该点击屏幕中心的按钮。"
   }}
 }}
 ```
 
-注意：
-- 必须输出有效的JSON格式
-- verdict必须是布尔值（true或false，小写）
-- scores中的三个分值必须是0-100之间的整数，其中reasoning_correctness固定为100
-- loop_detected必须是布尔值
-- failed_steps必须是数组，如果没有失败步骤则返回空数组[]，只包含action相关的失败
-- model_score和model_confidence必须是0-100之间的整数
-- refined_thinking必须是字符串，如果verdict=true则为空字符串，如果verdict=false则提供简要的修正思考（1-2句话）
-- refined_action必须是字符串，如果verdict=true则为空字符串，如果verdict=false则提供修正后的动作（需要转义引号，使用绝对像素坐标）
-- repair_suggestions必须是字符串
+**重要：**
+- 所有字符串值中的双引号都必须转义为\\"
+- refined字段中的内容如果包含引号，必须转义
+- repair字段中的内容如果包含引号，必须转义
+- 不要在字符串中使用未转义的双引号
 
---- 评估准则（CRITICAL - 必须严格遵循） ---
+**字段说明：**
+- verdict (boolean): 最后一步是否合理（true=合理继续，false=跑偏需纠正）
+- scores (integer, 0-100): 综合评分，评估最后一步动作的整体质量
+- model_score (integer, 0-100): 输出满足用户需求的程度
+- model_confidence (integer, 0-100): 你对判定的置信度
+- refined (string): **关键字段！** 如果verdict=false，提供修正后的完整输出（格式：<think>...</think><answer>...</answer>）
+  - **这个输出将直接替换Agent的原输出并立即执行**
+  - thinking部分简要说明为什么这样做（1-2句话）
+  - thinking部分可以包含对接下来步骤的粗略规划
+  - thinking需要以第一人称（Agent视角）叙述，不要使用第三人称
+  - answer部分必须是可直接执行的动作，使用绝对像素坐标
+  - 示例：<think>需要点击返回按钮退出当前死循环。</think><answer>do(action="Tap", element=[54, 108])</answer>
+  - 如果verdict=true，返回空字符串
+- repair (string): 说明为什么Agent跑偏以及如何纠正（用于日志和调试）
 
-**重要提示：不评估thinking的正确性，只关注action是否合理！**
-- thinking部分可以忽略，无论thinking内容如何，都不影响verdict的判断
-- reasoning_correctness固定设置为100
-- 只评估action是否符合当前屏幕状态和用户需求
-- **你需要评估最后{judge_steps_k}步的整体合理性，检查这{judge_steps_k}步中是否有失败的步骤**
+--- 评估准则 ---
 
-**1. 死循环检测（CRITICAL）**：
-   - 检查最后{judge_steps_k}步中是否有3次或更多次重复相同或非常相似的动作
-   - 重复动作的判断标准：
-     * 完全相同的action类型和参数（如多次点击同一坐标）
-     * 在相同或几乎相同的屏幕状态下执行相同类型的操作
-     * 交替执行2-3个动作但没有实质进展
-   - 如果检测到死循环，必须：
-     * 设置loop_detected=true
-     * 设置verdict=false
-     * 在failed_steps中列出所有参与循环的步骤
-     * 在refined_thinking和refined_action中提供对最后一步的修正输出（打破循环）
+**判断Agent是否跑偏的3个关键检查点：**
 
-**2. 动作预测的合理性（评估最后{judge_steps_k}步）**：
-   - 检查最后{judge_steps_k}步中每一步的action是否符合对应的屏幕状态
-   - 检查每一步action的参数是否有效（如坐标是否在屏幕范围内）
-   - 检查每一步action是否有助于完成用户任务
-   - 检查每一步action是否符合system prompt中定义的操作格式
-   - 将不合理的步骤添加到failed_steps列表中
+1. **任务推进性** - Agent的最近几步是否让任务有实质进展
+   - 动作是否符合当前屏幕状态（按钮/输入框等元素是否存在）
+   - 坐标是否有效（指向可交互元素）
+   - 是否在向用户目标前进
 
-**3. 上下文一致性（评估最后{judge_steps_k}步）**：
-   - 检查最后{judge_steps_k}步的action是否形成合理的执行链
-   - 检查是否有明显的逻辑跳跃或矛盾
-   - 参考提供的历史截图，理解任务的执行进度
-   - 将不一致的步骤添加到failed_steps列表中
+2. **死循环检测** - Agent是否在进行重复（>=3次）
+   - 重复点击相同位置但无效果
+   - 在相同屏幕间反复切换
+   - 重复输入相同内容但失败
+   - 多次尝试同一个策略但仍然未成功
+   → 发现死循环必须设置verdict=false，在refined中提供新策略
 
-**4. 格式正确性（评估最后{judge_steps_k}步）**：
-   - 检查最后{judge_steps_k}步的输出是否符合system prompt中要求的格式（<think>...</think><answer>...</answer>）
-   - 检查每一步action的格式是否正确
-   - 将格式错误的步骤添加到failed_steps列表中
+3. **多模态理解** - Agent是否正确理解了屏幕内容
+   - 识别的UI元素与实际屏幕是否匹配
+   - 动作类型是否符合元素类型（如对文本框使用Tap而非Type）
 
---- 评估原则 ---
-- **评估最后{judge_steps_k}步的整体合理性**，检查这{judge_steps_k}步中是否有失败的步骤
-- 如果最后K步中有任何一步不合理，设置verdict=false
-- 将所有不合理的步骤（包括最后一步）添加到failed_steps列表中
-- 死循环检测是**强制性的**，一旦发现必须标记
-- **不评估thinking的正确性**，即使thinking有错误也不影响verdict判断
-- **refined_thinking和refined_action只针对最后一步**：
-  * 如果最后一步不合理（verdict=false），**必须**同时提供refined_thinking和refined_action，给出对最后一步的完整修正输出
-  * 如果最后一步合理，refined_thinking和refined_action返回空字符串
-  * refined_thinking应该简要说明修正后的思考（1-2句话），不需要过于详细
-  * refined_action必须是可以直接执行的动作格式（如：do(action="Tap", element=[540, 960])，使用绝对像素坐标）
-- repair_suggestions可以针对所有失败步骤提供建议
-- 采用实用的评估标准，专注于action的正确性，不降低对明显错误（如死循环、错误的action）的判断标准
 
---- 立即执行 ---
-现在，请基于你收到的对话历史、历史截图和最后{judge_steps_k}步的模型输出进行评估，严格按照上述JSON格式输出Judge工具的结果。
+**判定原则：**
+- verdict=true: 动作合理，Agent在正确轨道上，refined返回空字符串
+- verdict=false: Agent跑偏，**必须**在refined中提供可立即执行的纠正动作
+  - refined的格式：<think>简要说明</think><answer>完整可执行的动作</answer>
+  - answer必须包含完整的do()函数调用，使用绝对像素坐标
+  - **这个输出会直接替换Agent的原输出并执行，所以必须确保可执行**
+- repair清晰说明问题所在和正确做法（用于日志）
+- 对明显错误（死循环、无效操作）零容忍
+
 """
 
 
@@ -493,17 +415,42 @@ def extract_judge_result(llm_response: dict[str, Any]) -> dict[str, Any]:
             except json.JSONDecodeError:
                 pass
         
-        # 方法4: 尝试提取代码块中的JSON
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+        # 方法4: 尝试提取代码块中的JSON（使用贪婪匹配处理嵌套对象）
+        json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', content, re.DOTALL)
         if json_match:
+            json_str = json_match.group(1).strip()
+
+            # 尝试直接解析
             try:
-                result = json.loads(json_match.group(1))
-                if isinstance(result, dict) and result.get('name') == 'Judge' and 'arguments' in result:
-                    return result['arguments']
-                elif 'verdict' in result:
-                    return result
+                result = json.loads(json_str)
+                if isinstance(result, dict):
+                    if result.get('name') == 'Judge' and 'arguments' in result:
+                        return result['arguments']
+                    elif 'verdict' in result:
+                        return result
             except json.JSONDecodeError:
                 pass
+
+            # 如果直接解析失败，尝试修复常见问题
+            try:
+                # 1. 移除尾部逗号
+                cleaned_json = re.sub(r',\s*}', '}', json_str)
+                cleaned_json = re.sub(r',\s*]', ']', cleaned_json)
+
+                # 2. 尝试解析修复后的JSON
+                result = json.loads(cleaned_json)
+                if isinstance(result, dict):
+                    if result.get('name') == 'Judge' and 'arguments' in result:
+                        return result['arguments']
+                    elif 'verdict' in result:
+                        return result
+            except json.JSONDecodeError:
+                pass
+
+            # 最后的手段：打印详细错误信息
+            print(f"[WARNING] Failed to parse JSON from code block")
+            print(f"JSON preview: {json_str[:200]}...")
+            pass
         
         # 方法5: 尝试直接解析整个content为JSON
         try:
@@ -726,14 +673,11 @@ def judge_model_output(
     Returns:
         评估结果字典，包含：
         - verdict: 是否合理（布尔值）
-        - scores: 评分字典
-        - loop_detected: 是否检测到死循环（布尔值）
-        - failed_steps: 失败步骤列表
+        - scores: 综合评分（0-100整数）
         - model_score: 模型评分（0-100）
         - model_confidence: 置信度（0-100）
-        - refined_thinking: 修正后的思考（字符串）
-        - refined_action: 修正后的动作（字符串）
-        - repair_suggestions: 修复建议
+        - refined: 修正后的完整输出（字符串，格式：<think>...</think><answer>...</answer>）
+        - repair: 修复建议（字符串）
         - reasoning_content: 模型的推理过程（字符串，如果存在）
     """
     # 构建judge prompt（嵌入GUIAgent的system prompt和K值）
