@@ -1,7 +1,10 @@
 {
   "return_type": "tool_use",
-  "name": "Launch",
+  "name": "Tap",
   "input": {
-    "package_name": "com.taobao.taobao"
+    "coordinate": [
+      210,
+      188
+    ]
   }
 }

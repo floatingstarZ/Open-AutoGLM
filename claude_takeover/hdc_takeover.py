@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional
 from PIL import Image
 
 from claude_takeover.model_client import ModelClient
+from judge_tools.convert_format import current_to_claude, gather_message_from_trace
 
 # Import HDC functions from phone_agent
 try:
@@ -120,6 +121,65 @@ class HDCTakeover:
         print(f"✅ 检测到 {len(devices)} 个设备:")
         for i, device in enumerate(devices, 1):
             print(f"   {i}. {device.device_id} ({device.connection_type.value})")
+    
+    def load_context_from_trace(self, trace_file: str, history_images_k: int = 10) -> List[Dict[str, Any]]:
+        """
+        Load context from trace file.
+        """
+        # 读取trace，收集消息，并转换为Claude格式
+        messages, image_scale = gather_message_from_trace(trace_file, 10, 
+                                                          target_width=self.model_client.target_width,
+                                                          history_images_k=history_images_k)
+
+        # 将所有messages合并到一个user message中
+        merged_content = []
+
+        # 在最开始添加一个text message，表明这是之前的轨迹
+        merged_content.append({
+            'type': 'text',
+            'text': '以下是之前Agent执行的轨迹记录：'
+        })
+
+        # 遍历所有messages，按照text, image, text的循环格式合并
+        for msg in messages:
+            role = msg.get('role', 'user')  # 默认为user
+            content = msg.get('content', [])
+            
+            # 处理content数组
+            if type(content) == str:
+                merged_content.append({
+                    'type': 'text',
+                    'text': content
+                })
+            else:
+                for item in content:
+                    if item.get('type') == 'text':
+                        # 为text添加标志，表示是user还是assistant的消息
+                        text_content = item.get('text', '')
+                        role_label = '[USER]' if role == 'user' else '[ASSISTANT]'
+                        merged_content.append({
+                            'type': 'text',
+                            'text': f'{role_label} {text_content}'
+                        })
+                    elif item.get('type') == 'image':
+                        # 直接添加image
+                        merged_content.append(item)
+            
+        # 创建新的messages列表，只包含一个user message
+        messages = [{
+            'role': 'user',
+            'content': merged_content
+        }]
+
+        continue_prompt = f'以上为之前Agent执行的trace，他使用的是不同的工具调用格式，请完成他的任务'
+        messages[-1]['content'].append({
+            'type': 'text',
+            'text': continue_prompt
+        })
+
+        self.context = messages
+        return messages
+
 
     def get_current_app_info(self) -> str:
         """Get current app name."""

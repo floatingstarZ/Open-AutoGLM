@@ -30,7 +30,7 @@ class AgentConfig:
     enable_trace_logging: bool = True
     trace_root: str | None = None
     # judge related
-    judge_check_interval: int = 5  # 每K步judge一次，0表示禁用
+    judge_check_interval: int = 20  # 每K步judge一次，0表示禁用
     enable_periodic_judge: bool = True  # 是否启用定期judge
     target_width: int = 512 # 图片缩放的目标宽度（短边）
 

@@ -293,7 +293,6 @@ class ModelClient:
                 }]
             })
         else:
-            pass
             # Regular user message
             message_content = []
 
@@ -345,32 +344,21 @@ class ModelClient:
             try:
                 with open('data.json', 'wt+') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
-                    print(f'Saved data to data.json')
                 with open('headers.json', 'wt+') as f:
                     json.dump(headers, f, ensure_ascii=False, indent=2)
-                    print(f'Saved headers to headers.json')
                 print('url:', self.url)
-                ###############3
                 # data_pth = '/Users/huangziyue/CodeGeeXProjects/claude-for-phone/data.json'
                 # with open(data_pth, 'r') as f:
                 #     data = json.load(f)
                 #     print(f'loaded data from {data_pth}')
-                # headers_pth = '/Users/huangziyue/CodeGeeXProjects/claude-for-phone/headers.json'
-                # with open(headers_pth, 'r') as f:
-                #     headers = json.load(f)
-                #     print(f'loaded headers from {headers_pth}')
                 # print(data)
                 # print(headers)
-                ###############
                 response = requests.post(
                     url=self.url,
                     headers=headers,
                     json=data,
                     timeout=120
                 )
-                print(f'response: {response.json()}')
-                print(f'model_name: {self.model}')
-                # exit()
                 response.raise_for_status()
                 return response.json()
             except Exception as e:
