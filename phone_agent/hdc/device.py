@@ -22,32 +22,22 @@ def get_current_app(device_id: str | None = None) -> str:
     """
     hdc_prefix = _get_hdc_prefix(device_id)
 
-    # Use 'aa dump -l' to list running abilities
     result = _run_hdc_command(
-        hdc_prefix + ["shell", "aa", "dump", "-l"],
+        hdc_prefix + ["shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"],
         capture_output=True,
         text=True,
         encoding="utf-8"
     )
     output = result.stdout
     if not output:
-        raise ValueError("No output from aa dump")
+        raise ValueError("No output from hidumper")
 
-    # Get the last app name (which is the foreground app)
-    last_bundle = None
+    # Parse window focus info
     for line in output.split("\n"):
-        if "app name [" in line:
-            # Extract bundle name from brackets
-            import re
-            match = re.search(r'\[([^\]]+)\]', line)
-            if match:
-                last_bundle = match.group(1)
-
-    # Match against known apps
-    if last_bundle:
-        for app_name, package in APP_PACKAGES.items():
-            if package == last_bundle:
-                return app_name
+        if "focused" in line.lower() or "current" in line.lower():
+            for app_name, package in APP_PACKAGES.items():
+                if package in line:
+                    return app_name
 
     return "System Home"
 

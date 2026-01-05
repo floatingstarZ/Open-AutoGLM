@@ -139,9 +139,48 @@ class TraceLogger:
         logger.info(f"Logged step {self.step_index} for task {self.task_id}")
         logger.info(f"Step data appended to: {self.trace_file.absolute()}")
 
+    def log_judge_result(
+        self,
+        step_index: int,
+        judge_result: dict[str, Any],
+        raw_model_output: str,
+    ) -> None:
+        """
+        Log judge result for a specific step.
+
+        Args:
+            step_index: The step index for which judge was performed
+            judge_result: Judge result dictionary
+        """
+        if not self.task_id or not self.task_dir:
+            logger.warning("Cannot log judge result: task not started")
+            return
+
+        # Create judge result record
+        judge_data = {
+            "type": "judge_result",
+            "task_id": self.task_id,
+            "step_index": step_index,
+            "timestamp": datetime.now().isoformat(),
+            "judge_result": judge_result,
+            "raw_model_output": raw_model_output,
+        }
+
+        self._append_to_trace(judge_data)
+        logger.info(f"Logged judge result for step {step_index}")
+
     def reset(self) -> None:
         """Reset logger state after task completion."""
         if self.task_id and self.task_dir:
+            # Record task end in trace file
+            task_end_data = {
+                "type": "task_end",
+                "task_id": self.task_id,
+                "total_steps": self.step_index,
+                "timestamp": datetime.now().isoformat(),
+            }
+            self._append_to_trace(task_end_data)
+            
             logger.info(f"Task {self.task_id} completed with {self.step_index} steps")
             logger.info(f"Complete trace saved in: {self.task_dir.absolute()}")
             logger.info(f"  - Trace file: {self.trace_file.absolute()}")

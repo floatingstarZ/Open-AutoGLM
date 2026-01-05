@@ -116,8 +116,8 @@ class PhoneAgent:
 
         # Start trace logging
         if self.trace_logger:
-            # Use timestamp (down to minute) for task ID
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            # Use timestamp (down to second) for task ID
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self._current_task_id = f"task_{timestamp}"
             self.trace_logger.start_task(self._current_task_id, task)
             if self.agent_config.verbose:
@@ -346,13 +346,27 @@ class PhoneAgent:
                 self.agent_config.judge_check_interval > 0 and
                 self._step_count % self.agent_config.judge_check_interval == 0
             )
-            print(f'Step {self._step_count} should_judge: {should_judge}')
+            print(f'Step {self._step_count}, {self.agent_config.enable_periodic_judge}, {self.agent_config.judge_check_interval}, {self._step_count % self.agent_config.judge_check_interval}: {should_judge}')
 
+            judge_result = None
+            judge_result_full = None  # 用于记录完整的judge结果（包括通过的）
             if should_judge:
-                # 执行judge
-                judge_result = self._perform_judge_check_with_output(
+                # 执行judge（获取完整结果用于记录）
+                judge_result_full = self._perform_judge_check_with_output(
                     screenshot, thinking, action_str
                 )
+                
+                # 记录judge结果（无论是否通过）
+                if self.trace_logger and judge_result_full is not None:
+                    self.trace_logger.log_judge_result(
+                        step_index=self._step_count,
+                        judge_result=judge_result_full, 
+                        raw_model_output=raw_output
+                    )
+                
+                # judge_result用于repair逻辑（只有失败时不为None）
+                verdict = judge_result_full.get("verdict", True) if judge_result_full else True
+                judge_result = judge_result_full if (judge_result_full and not verdict) else None
 
                 if judge_result is not None:
                     # Judge失败，使用repair的输出
@@ -459,7 +473,7 @@ class PhoneAgent:
             action_str: 动作字符串
 
         Returns:
-            Judge result if verdict is False, None if verdict is True
+            完整的Judge result（无论是否通过）
         """
         if not self.agent_config.enable_periodic_judge:
             return None
@@ -533,8 +547,8 @@ class PhoneAgent:
                 else:
                     print(f"   ❌ Judge: FAIL (score: {judge_result.get('model_score', 'N/A')})")
 
-            # Return judge result only if verdict is False
-            return judge_result if not verdict else None
+            # 总是返回完整的judge结果（用于记录）
+            return judge_result
 
         except Exception as e:
             if self.agent_config.verbose:

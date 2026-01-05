@@ -17,8 +17,8 @@ class ModelConfig:
     base_url: str = "http://localhost:8000/v1"
     api_key: str = "EMPTY"
     model_name: str = "autoglm-phone-9b"
-    max_tokens: int = 6000
-    temperature: float = 0.25
+    max_tokens: int = 3000
+    temperature: float = 0.2
     top_p: float = 0.85
     frequency_penalty: float = 0.2
     extra_body: dict[str, Any] = field(default_factory=dict)

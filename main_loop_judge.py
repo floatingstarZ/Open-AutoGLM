@@ -615,6 +615,38 @@ def main():
         result = agent.run(args.task)
         print(f"\nResult: {result}\n")
 
+        # 保存所有judge结果到文件
+        if agent.trace_logger and agent.trace_logger.task_dir:
+            trace_dir = agent.trace_logger.task_dir
+            trace_file = agent.trace_logger.trace_file
+            
+            # 从trace.jsonl中提取所有judge_result记录
+            judge_results = []
+            if trace_file and trace_file.exists():
+                try:
+                    with open(trace_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                                if data.get("type") == "judge_result":
+                                    judge_results.append(data)
+                            except json.JSONDecodeError:
+                                continue
+                except Exception as e:
+                    print(f"[WARNING] Failed to read judge results from trace: {e}")
+            
+            # 保存judge结果到单独的文件
+            if judge_results:
+                judge_result_file = trace_dir / "judge_results.json"
+                with open(judge_result_file, 'w', encoding='utf-8') as f:
+                    json.dump(judge_results, f, ensure_ascii=False, indent=2)
+                print(f"📊 Saved {len(judge_results)} judge result(s) to: {judge_result_file}")
+            else:
+                print("📊 No judge results found in this task")
+
         ##########
         # judge 中断
         claude_takeover = False
@@ -649,34 +681,42 @@ def main():
 
                 if not task:
                     continue
-
+                
                 result = agent.run(task)
                 print(f"\nResult: {result}\n")
-                input_continue = input('Press Enter to continue...')
-
-                ##########
-                # judge 中断
-                claude_takeover = False
-                if isinstance(result, dict) and 'status' in result:
-                    print(f"Result type: {type(result)}")
-                    print(f"Status: {result['status']}")
-                    if result['status'] == 'interrupted_by_judge':
-                        print('=' * 100)
-                        print(f"Judge interrupted")
-                        print('=' * 100)
-                        claude_takeover = True
-                        trace_dir = result['trace_dir']
-                        with open(f'{trace_dir}/agent_with_judge_result.json', 'wt+') as f:
-                            json.dump(result, f, ensure_ascii=False, indent=2)
-                            print(f'Save judge result to {trace_dir}/agent_with_judge_result.json')
-                # claude takeover
-                if claude_takeover:
-                    print('=' * 100)
-                    print(f"Claude takeover")
-                    print('=' * 100)
+                
+                # 保存所有judge结果到文件
+                if agent.trace_logger and agent.trace_logger.task_dir:
+                    trace_dir = agent.trace_logger.task_dir
+                    trace_file = agent.trace_logger.trace_file
                     
-                ##########
-
+                    # 从trace.jsonl中提取所有judge_result记录
+                    judge_results = []
+                    if trace_file and trace_file.exists():
+                        try:
+                            with open(trace_file, 'r', encoding='utf-8') as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    try:
+                                        data = json.loads(line)
+                                        if data.get("type") == "judge_result":
+                                            judge_results.append(data)
+                                    except json.JSONDecodeError:
+                                        continue
+                        except Exception as e:
+                            print(f"[WARNING] Failed to read judge results from trace: {e}")
+                    
+                    # 保存judge结果到单独的文件
+                    if judge_results:
+                        judge_result_file = trace_dir / "judge_results.json"
+                        with open(judge_result_file, 'w', encoding='utf-8') as f:
+                            json.dump(judge_results, f, ensure_ascii=False, indent=2)
+                        print(f"📊 Saved {len(judge_results)} judge result(s) to: {judge_result_file}")
+                    else:
+                        print("📊 No judge results found in this task")
+                
                 agent.reset()
 
             except KeyboardInterrupt:

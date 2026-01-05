@@ -7,28 +7,53 @@ from typing import Optional
 from phone_agent.hdc.connection import _run_hdc_command
 
 
-def type_text(text: str, device_id: str | None = None, x: int = None, y: int = None) -> None:
+def type_text(text: str, device_id: str | None = None) -> None:
     """
     Type text into the currently focused input field.
 
     Args:
-        text: The text to type.
+        text: The text to type. Supports multi-line text with newline characters.
         device_id: Optional HDC device ID for multi-device setups.
-        x: Optional X coordinate for input field (deprecated, kept for compatibility).
-        y: Optional Y coordinate for input field (deprecated, kept for compatibility).
 
     Note:
         HarmonyOS uses: hdc shell uitest uiInput text "文本内容"
         This command works without coordinates when input field is focused.
+        For multi-line text, the function splits by newlines and sends ENTER keyEvents.
+        ENTER key code in HarmonyOS: 2054
         Recommendation: Click on the input field first to focus it, then use this function.
     """
     hdc_prefix = _get_hdc_prefix(device_id)
 
-    # Escape special characters for shell (keep quotes for proper text handling)
-    # The text will be wrapped in quotes in the command
-    escaped_text = text.replace('"', '\\"').replace("$", "\\$")
+    # Handle multi-line text by splitting on newlines
+    if '\n' in text:
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            if line:  # Only process non-empty lines
+                # Escape special characters for shell
+                escaped_line = line.replace('"', '\\"').replace("$", "\\$")
 
-    try:
+                _run_hdc_command(
+                    hdc_prefix + ["shell", "uitest", "uiInput", "text", escaped_line],
+                    capture_output=True,
+                    text=True,
+                )
+
+            # Send ENTER key event after each line except the last one
+            if i < len(lines) - 1:
+                try:
+                    _run_hdc_command(
+                        hdc_prefix + ["shell", "uitest", "uiInput", "keyEvent", "2054"],
+                        capture_output=True,
+                        text=True,
+                    )
+                except Exception as e:
+                    print(f"[HDC] ENTER keyEvent failed: {e}")
+    else:
+        # Single line text - original logic
+        # Escape special characters for shell (keep quotes for proper text handling)
+        # The text will be wrapped in quotes in the command
+        escaped_text = text.replace('"', '\\"').replace("$", "\\$")
+
         # HarmonyOS uitest uiInput text command
         # Format: hdc shell uitest uiInput text "文本内容"
         _run_hdc_command(
@@ -36,18 +61,6 @@ def type_text(text: str, device_id: str | None = None, x: int = None, y: int = N
             capture_output=True,
             text=True,
         )
-    except Exception as e:
-        print(f"[HDC] Text input failed: {e}")
-        # Fallback: try with coordinates if provided (for older HarmonyOS versions)
-        if x is not None and y is not None:
-            try:
-                _run_hdc_command(
-                    hdc_prefix + ["shell", "uitest", "uiInput", "inputText", str(x), str(y), escaped_text],
-                    capture_output=True,
-                    text=True,
-                )
-            except Exception:
-                pass
 
 
 def clear_text(device_id: str | None = None) -> None:

@@ -226,6 +226,7 @@ def check_model_api(base_url: str, model_name: str, api_key: str = "EMPTY") -> b
     try:
         # Create OpenAI client
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=30.0)
+        print(client.models.list())
 
         # Use chat completion to test connectivity (more universally supported than /models)
         response = client.chat.completions.create(
