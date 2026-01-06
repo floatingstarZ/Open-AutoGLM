@@ -58,6 +58,10 @@ traces/**/*.png
 traces/**/*.jpg
 traces/**/*.jpeg
 traces/**/*.gif
+resources/**/*.png
+resources/**/*.jpg
+resources/**/*.jpeg
+resources/**/*.gif
 
 # Keep old files during transition
 call_model.py
@@ -65,4 +69,4 @@ app_package_name.py
 ./traces
 ./traces_v2
 ./traces_v1
-
+*.html
