@@ -1,72 +1,90 @@
+########################
 # Python
+########################
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
+.eggs/
 .installed.cfg
 *.egg
 
-# Virtual environments
+########################
+# Virtual Environments
+########################
 venv/
-ENV/
 env/
 .venv/
+ENV/
 
-# IDE
+########################
+# IDE / Editor
+########################
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# Testing
+########################
+# Testing / Coverage
+########################
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .nox/
 
+########################
 # Type checking
+########################
 .mypy_cache/
 
+########################
 # Jupyter
+########################
 .ipynb_checkpoints/
 
+########################
 # OS
+########################
 .DS_Store
 Thumbs.db
 
-# Project specific
+########################
+# Logs / Temp
+########################
 *.log
-/tmp/
-screenshots/
-traces/**/*.png
-traces/**/*.jpg
-traces/**/*.jpeg
-traces/**/*.gif
-resources/**/*.png
-resources/**/*.jpg
-resources/**/*.jpeg
-resources/**/*.gif
+tmp/
+logs/
 
-# Keep old files during transition
+########################
+# Auto-generated Artifacts (IMPORTANT)
+########################
+# traces & experiment outputs
+traces/
+traces_v1/
+traces_v2/
+
+# screenshots / images
+screenshots/
+resources/
+
+# common large artifacts
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.html
+*.jsonl
+
+########################
+# Project specific
+########################
 call_model.py
 app_package_name.py
-./traces/*
-./traces_v2/*
-./traces_v1/*
-*.html
