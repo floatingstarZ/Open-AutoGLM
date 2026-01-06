@@ -1,0 +1,21 @@
+{
+  "user": {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "** Screen Info **\n\n{\"current_app\": \"WeChat\"}"
+      },
+      {
+        "type": "image_url",
+        "image_url": {
+          "url": "data:image/png;base64,iVBORw0..."
+        }
+      }
+    ]
+  },
+  "assistant": {
+    "role": "assistant",
+    "content": "<think>任务已完成</think><answer>finish(message=\"微信已打开\")</answer>"
+  }
+}

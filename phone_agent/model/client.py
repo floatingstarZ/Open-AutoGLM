@@ -164,6 +164,18 @@ class ModelClient:
         )
         print("=" * 50)
 
+        print('*' * 50)
+        # print(f'raw_content: {raw_content}')
+        # print(f'messages: {messages}')
+        with open('./raw_model_input_output.json', 'wt+') as f:
+            print(f'save raw_model_input_output to ./raw_model_input_output.json')
+            print(f'raw_content: {raw_content}')
+            json.dump({
+                'raw_content': raw_content,
+                'messages': messages
+            }, f, ensure_ascii=False, indent=2)
+        print('*' * 50)
+
         return ModelResponse(
             thinking=thinking,
             action=action,
