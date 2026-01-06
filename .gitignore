@@ -62,3 +62,7 @@ traces/**/*.gif
 # Keep old files during transition
 call_model.py
 app_package_name.py
+./traces
+./traces_v2
+./traces_v1
+

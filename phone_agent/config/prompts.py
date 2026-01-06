@@ -102,10 +102,6 @@ ABSOLUTE_COORD_SYSTEM_PROMPT = (
     Interact是当有多个满足条件的选项时而触发的交互操作，询问用户如何选择。
 - do(action="Swipe", start=[x1,y1], end=[x2,y2])  
     Swipe是滑动操作，通过从起始坐标拖动到结束坐标来执行滑动手势。可用于滚动内容、在屏幕之间导航、下拉通知栏以及项目栏或进行基于手势的导航。坐标系统使用绝对坐标，从左上角 (0,0) 开始，到右下角为屏幕的实际分辨率 (width,height)，其中 width 和 height 是屏幕的实际像素宽度和高度。坐标值必须是屏幕上的实际像素位置。滑动持续时间会自动调整以实现自然的移动。此操作完成后，您将自动收到结果状态的截图。
-- do(action="Note", message="True")  
-    记录当前页面内容以便后续总结。
-- do(action="Call_API", instruction="xxx")  
-    总结或评论当前页面或已记录的内容。
 - do(action="Long Press", element=[x,y])  
     Long Pres是长按操作，在屏幕上的特定点长按指定时间。可用于触发上下文菜单、选择文本或激活长按交互。坐标系统使用绝对坐标，从左上角 (0,0) 开始，到右下角为屏幕的实际分辨率 (width,height)，其中 width 和 height 是屏幕的实际像素宽度和高度。坐标值必须是屏幕上的实际像素位置。此操作完成后，您将自动收到结果状态的屏幕截图。
 - do(action="Double Tap", element=[x,y])  

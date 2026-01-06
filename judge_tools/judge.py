@@ -50,7 +50,7 @@ DEFAULT_RETRY_DELAY = 5
 #                     new_height = TARGET_WIDTH
 #                     new_width = int(width * (TARGET_WIDTH / height))
             
-DEFAULT_JUDGE_STEPS_K = 5  # 评估最后K步的默认值
+DEFAULT_JUDGE_STEPS_K = 20  # 评估最后K步的默认值
 
 # Judge工具定义
 JUDGE_TOOL = {

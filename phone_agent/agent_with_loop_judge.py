@@ -31,7 +31,9 @@ class AgentConfig:
     enable_trace_logging: bool = True
     trace_root: str | None = None
     # judge related
-    judge_check_interval: int = 10  # 每K步judge一次，0表示禁用
+    judge_check_interval: int = 10  # 每K步judge一次，0表示禁用（初始值，会被动态调整）
+    judge_check_interval_high: int = 5  # judge失败后的高频率（每1步）
+    judge_check_interval_low: int = 10  # judge成功后的低频率（每10步）
     enable_periodic_judge: bool = True  # 是否启用定期judge
     target_width: int = 512 # 图片缩放的目标宽度（短边）
 
@@ -100,6 +102,8 @@ class PhoneAgent:
         self._current_task_id: str | None = None
         self._screenshot_width: int = 0
         self._screenshot_height: int = 0
+        # 当前judge频率（动态调整）
+        self._current_judge_interval = self.agent_config.judge_check_interval
 
     def run(self, task: str) -> str:
         """
@@ -113,6 +117,8 @@ class PhoneAgent:
         """
         self._context = []
         self._step_count = 0
+        # 重置judge频率
+        self._current_judge_interval = self.agent_config.judge_check_interval
 
         # Start trace logging
         if self.trace_logger:
@@ -182,6 +188,8 @@ class PhoneAgent:
         self._context = []
         self._step_count = 0
         self._current_task_id = None
+        # 重置judge频率
+        self._current_judge_interval = self.agent_config.judge_check_interval
 
     def _get_model_inference(
         self, user_prompt: str | None = None, is_first: bool = False
@@ -341,12 +349,30 @@ class PhoneAgent:
             action_str = response.action
             raw_output = response.raw_content
 
-            should_judge = (
-                self.agent_config.enable_periodic_judge and
-                self.agent_config.judge_check_interval > 0 and
-                self._step_count % self.agent_config.judge_check_interval == 0
-            )
-            print(f'Step {self._step_count}, {self.agent_config.enable_periodic_judge}, {self.agent_config.judge_check_interval}, {self._step_count % self.agent_config.judge_check_interval}: {should_judge}')
+            # 解析action判断是否是finish或takeover
+            is_finish_action = False
+            is_takeover_action = False
+            try:
+                action = parse_action(action_str)
+                is_finish_action = action.get("_metadata") == "finish"
+                is_takeover_action = (
+                    action.get("_metadata") == "do" and 
+                    action.get("action") == "Take_over"
+                )
+            except:
+                pass  # 如果解析失败，继续正常流程
+
+            # 判断是否需要judge：定期检查 或 finish/takeover动作
+            should_judge = False
+            if self.agent_config.enable_periodic_judge and self._current_judge_interval > 0:
+                # 定期judge检查
+                if self._step_count % self._current_judge_interval == 0:
+                    should_judge = True
+                # finish或takeover动作也需要judge
+                elif is_finish_action: #  or is_takeover_action:
+                    should_judge = True
+
+            print(f'Step {self._step_count}, enable_periodic_judge={self.agent_config.enable_periodic_judge}, current_judge_interval={self._current_judge_interval}, is_finish={is_finish_action}, is_takeover={is_takeover_action}, should_judge={should_judge}')
 
             judge_result = None
             judge_result_full = None  # 用于记录完整的judge结果（包括通过的）
@@ -367,6 +393,19 @@ class PhoneAgent:
                 # judge_result用于repair逻辑（只有失败时不为None）
                 verdict = judge_result_full.get("verdict", True) if judge_result_full else True
                 judge_result = judge_result_full if (judge_result_full and not verdict) else None
+
+                # 根据judge结果动态调整频率
+                if judge_result_full is not None:
+                    if verdict:
+                        # judge成功，切换到低频率
+                        self._current_judge_interval = self.agent_config.judge_check_interval_low
+                        if self.agent_config.verbose:
+                            print(f"   ✅ Judge passed, switching to low frequency: {self._current_judge_interval}")
+                    else:
+                        # judge失败，切换到高频率
+                        self._current_judge_interval = self.agent_config.judge_check_interval_high
+                        if self.agent_config.verbose:
+                            print(f"   ❌ Judge failed, switching to high frequency: {self._current_judge_interval}")
 
                 if judge_result is not None:
                     # Judge失败，使用repair的输出
