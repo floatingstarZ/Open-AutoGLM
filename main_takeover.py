@@ -46,20 +46,25 @@ from main import (
 class SimpleTraceLogger:
     """简单的实时日志记录器"""
 
-    def __init__(self, trace_root="./traces"):
+    def __init__(self, trace_root="./traces", 
+    task_id=None, task_dir=None, trace_file=None, step_count=0):
         self.trace_root = Path(trace_root)
-        self.task_id = None
-        self.task_dir = None
-        self.trace_file = None
-        self.step_count = 0
+        self.task_id = task_id
+        self.task_dir = Path(task_dir)
+        self.trace_file = Path(trace_file)
+        self.step_count = step_count
 
     def start_task(self, task, k_images, max_steps):
         """开始任务，创建目录和文件"""
-        self.task_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.task_dir = self.trace_root / self.task_id
-        self.task_dir.mkdir(parents=True, exist_ok=True)
-        self.trace_file = self.task_dir / "trace.jsonl"
-        self.step_count = 0
+        if self.task_id is None:
+            self.task_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if self.task_dir is None:
+            self.task_dir = self.trace_root / self.task_id
+            self.task_dir.mkdir(parents=True, exist_ok=True)
+        if self.trace_file is None:
+            self.trace_file = self.task_dir / "trace.jsonl"
+        if self.step_count is None:
+            self.step_count = 0
 
         # 写入第1行：task_start
         self._append(
@@ -76,9 +81,9 @@ class SimpleTraceLogger:
 
         return self.task_dir
 
-    def log_system(self, system_prompt):
+    def log_system(self, system_prompt, model_type=None):
         """记录 system message（第2行）"""
-        self._append({"type": "system", "content": system_prompt})
+        self._append({"type": "system", "model_type": model_type, "content": system_prompt})
 
     def log_user(self, text, base64_image):
         """记录 user message，保存截图"""
@@ -98,6 +103,23 @@ class SimpleTraceLogger:
                 ],
             }
         )
+    def log_debug_info(self, debug_info):
+        """记录 external message"""
+        self._append(
+            {
+                "type": "debug_info",
+                "debug_info": debug_info,
+            }
+        )
+    def save_debug(self, filename: str, data: dict[str, Any]):
+        """Save debug data to file"""
+        self.debug_dir = self.task_dir / "debug"
+        self.debug_dir.mkdir(parents=True, exist_ok=True)
+
+        debug_file = self.debug_dir / filename
+        with open(debug_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"🐛 Debug saved to: {debug_file.absolute()}")
 
     def log_assistant(self, assistant_content):
         """记录 assistant message"""
@@ -366,8 +388,7 @@ def run_task_with_service(
     system_prompt: str,
     verbose: bool,
     lang: str,
-    enable_trace: bool = True,
-    trace_root: str = "./traces",
+    logger: SimpleTraceLogger | None = None,
     test_mode: bool = False,
     enable_judge: bool = False,
     judge_interval: int = 1,
@@ -386,8 +407,7 @@ def run_task_with_service(
         system_prompt: System prompt for first message
         verbose: Whether to print verbose output
         lang: Language for messages
-        enable_trace: Whether to enable trace logging (default: True)
-        trace_root: Root directory for trace logs (default: ./traces)
+        logger: Trace logger instance (default: None, trace logging is enabled by default)
         test_mode: Whether to save final user+assistant messages (default: False)
         enable_judge: Whether to enable judge evaluation (default: False)
         judge_interval: Judge evaluation interval in steps (default: 1, judge every step)
@@ -401,10 +421,8 @@ def run_task_with_service(
         - judge_result: Judge result dictionary (if interrupted by judge)
         - log_dir: Path to log directory (if trace logging enabled)
     """
-    # Initialize trace logger
-    logger = None
-    if enable_trace:
-        logger = SimpleTraceLogger(trace_root)
+    # Initialize trace logger task
+    if logger:
         trace_dir = logger.start_task(
             task, service.inference_config.k_images, max_steps
         )
@@ -417,7 +435,7 @@ def run_task_with_service(
     # Add system message
     messages.append(MessageBuilder.create_system_message(system_prompt))
     if logger:
-        logger.log_system(system_prompt)
+        logger.log_system(system_prompt, model_type="service")
 
     # First step: Add user task with screenshot
     base64_img, width, height = screenshot_to_base64(device_id)
@@ -516,6 +534,7 @@ def run_task_with_service(
                     print(f"[WARNING] Judge evaluation failed: {e}")
                 import traceback
                 traceback.print_exc()
+            judge_result['verdict'] = False
             if judge_result.get('verdict') == False:
                 return {
                     "status": "interrupted_by_judge",
@@ -760,8 +779,7 @@ def run_task_with_claude_backend(
     api_url: str = None,
     model: str = None,
     target_width: int = 512,
-    enable_trace: bool = True,
-    trace_root: str = "./claude_backend_traces",
+    logger: SimpleTraceLogger | None = None,
     test_mode: bool = False,
 ) -> dict[str, Any]:
     """
@@ -782,8 +800,7 @@ def run_task_with_claude_backend(
         api_url: Claude API URL (default: None, uses ModelInterface default)
         model: Claude model name (default: None, uses ModelInterface default)
         target_width: Target width for screenshot resizing (default: 512)
-        enable_trace: Whether to enable trace logging (default: True)
-        trace_root: Root directory for trace logs (default: ./claude_backend_traces)
+        logger: Trace logger instance (default: None, trace logging is enabled by default)
         test_mode: Whether to save final user+assistant messages (default: False)
 
     Returns:
@@ -804,10 +821,8 @@ def run_task_with_claude_backend(
         target_width=target_width
     )
 
-    # Initialize trace logger
-    logger = None
-    if enable_trace:
-        logger = SimpleTraceLogger(trace_root)
+    # Initialize trace logger task
+    if logger:
         trace_dir = logger.start_task(task, k_images=-1, max_steps=max_steps)
         if verbose:
             print(f"📊 Trace logging to: {trace_dir}")
@@ -822,7 +837,7 @@ def run_task_with_claude_backend(
 
     # Log system prompt (for trace only)
     if logger:
-        logger.log_system(system_prompt)
+        logger.log_system(system_prompt, model_type="claude_backend")
 
     # First call to ModelInterface
     screen_info = MessageBuilder.build_screen_info(current_app)
@@ -839,6 +854,217 @@ def run_task_with_claude_backend(
             screenshot_base64=base64_img,
             current_app_name=current_app,
             user_prompt=user_prompt
+        )
+    except Exception as e:
+        if verbose:
+            print(f"Model error: {e}")
+        return {
+            "status": "model_error",
+            "message": f"Model error: {e}",
+            "log_dir": str(logger.task_dir.absolute()) if logger else None
+        }
+
+    # Main loop
+    step_count = 0
+    msgs = get_messages(lang)
+
+    while step_count < max_steps:
+        step_count += 1
+
+        if verbose:
+            print(f"\n{'='*50}")
+            print(f"Step {step_count}/{max_steps}")
+            print(f"{'='*50}")
+
+        # Parse response
+        response = result["response"]  # ActionHandler format + absolute coordinates
+        thinking = result.get("thinking", "")
+
+        if verbose:
+            print(f"\n💭 {msgs['thinking']}:")
+            print(thinking)
+            print(f"\n🎯 {msgs['action']}:")
+            print(json.dumps(response, ensure_ascii=False, indent=2))
+
+        # Log assistant message
+        if logger:
+            assistant_content = f"<think>{thinking}</think><answer>{json.dumps(response, ensure_ascii=False)}</answer>"
+            logger.log_assistant(assistant_content)
+
+        # Check if finish
+        if response.get("_metadata") == "finish":
+            final_message = response.get("message", msgs.get("done", "Task completed"))
+            if logger:
+                logger.end_task("completed", final_message, step_count)
+            if test_mode and logger:
+                pass  # Cannot save final_messages without maintaining messages list
+            if verbose:
+                print(f"\n✅ {msgs['task_completed']}: {final_message}")
+                if logger:
+                    print(f"📊 Trace saved: {logger.task_dir.absolute()}")
+            return {
+                "status": "completed",
+                "message": final_message,
+                "log_dir": str(logger.task_dir.absolute()) if logger else None
+            }
+
+        # Execute action - convert coordinates
+        try:
+            action = convert_absolute_to_relative(response, width, height)
+            action_result = action_handler.execute(action, width, height)
+        except Exception as e:
+            if verbose:
+                print(f"Action execution error: {e}")
+
+        # Check if action requested finish
+        if action_result.should_finish:
+            final_message = action_result.message or msgs.get("done", "Task completed")
+            if logger:
+                logger.end_task("completed", final_message, step_count)
+            if test_mode and logger:
+                pass
+            if verbose:
+                print(f"\n🎉 Action completed the task: {final_message}")
+                if logger:
+                    print(f"📊 Trace saved: {logger.task_dir.absolute()}")
+            return {
+                "status": "completed",
+                "message": final_message,
+                "log_dir": str(logger.task_dir.absolute()) if logger else None
+            }
+
+        # Get new screenshot
+        base64_img, width, height = screenshot_to_base64(device_id)
+        current_app = device_factory.get_current_app(device_id)
+
+        screen_info = MessageBuilder.build_screen_info(current_app)
+        text_content = f"** Screen Info **\n\n{screen_info}"
+
+        # Log user message
+        if logger:
+            logger.log_user(text_content, base64_img)
+
+        # Next call to ModelInterface
+        try:
+            result = model_interface.call_model(
+                context=context,
+                screenshot_base64=base64_img,
+                current_app_name=current_app,
+                user_prompt=""  # tool_result doesn't need additional prompt
+            )
+        except Exception as e:
+            if verbose:
+                print(f"Model error: {e}")
+            if logger:
+                logger.end_task("model_error", f"Model error: {e}", step_count)
+            return {
+                "status": "model_error",
+                "message": f"Model error: {e}",
+                "log_dir": str(logger.task_dir.absolute()) if logger else None
+            }
+
+    # Max steps reached
+    if logger:
+        logger.end_task("max_steps_reached", "Max steps reached", step_count)
+    if verbose:
+        print(f"\n⚠️  达到最大迭代次数 ({max_steps})")
+    return {
+        "status": "max_steps_reached",
+        "message": "Max steps reached",
+        "log_dir": str(logger.task_dir.absolute()) if logger else None
+    }
+
+
+
+def take_over_with_claude_backend(
+    task: str,
+    claude_context: list[dict[str, Any]],
+    action_handler: ActionHandler,
+    max_steps: int,
+    device_id: str | None,
+    system_prompt: str,
+    verbose: bool,
+    lang: str,
+    api_key: str = None,
+    api_url: str = None,
+    model: str = None,
+    target_width: int = 512,
+    logger: SimpleTraceLogger | None = None,
+    test_mode: bool = False,
+) -> dict[str, Any]:
+    """
+    Run a task using direct ModelInterface (Claude backend).
+
+    This function manages context like run_task_with_service but uses
+    ModelInterface instead of AgentService for inference.
+
+    Args:
+        task: User task description
+        action_handler: ActionHandler instance
+        max_steps: Maximum steps to execute
+        device_id: Device ID for screenshots
+        system_prompt: System prompt for the model
+        verbose: Whether to print verbose output
+        lang: Language for messages
+        api_key: Claude API key (default: None, uses env var)
+        api_url: Claude API URL (default: None, uses ModelInterface default)
+        model: Claude model name (default: None, uses ModelInterface default)
+        target_width: Target width for screenshot resizing (default: 512)
+        logger: Trace logger instance (default: None, trace logging is enabled by default)
+        test_mode: Whether to save final user+assistant messages (default: False)
+
+    Returns:
+        Dictionary with keys:
+        - status: Status string ("completed", "max_steps_reached", "model_error")
+        - message: Result message (if applicable)
+        - log_dir: Path to log directory (if trace logging enabled)
+    """
+    # Initialize ModelInterface
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from backend.model_interface import ModelInterface
+
+    model_interface = ModelInterface(
+        api_key=api_key,
+        api_url=api_url,
+        model=model,
+        target_width=target_width
+    )
+
+    # Initialize trace logger task
+    if logger and verbose:
+        print(f"📊 Trace logging to: {logger.task_dir.absolute()}")
+
+    # 初始化claude_context
+    claude_context.append({
+        "type": "text",
+        "text": f"基于上下文，接下来你来继续完成任务：{task}"
+    })
+    # logger.save_debug(f"claude_context_01.json", {
+    #     "claude_context": claude_context
+    # })
+
+    # Initialize context (Claude API format)
+    context: list[dict[str, Any]] = []
+
+    # Get initial screenshot
+    base64_img, width, height = screenshot_to_base64(device_id)
+    device_factory = get_device_factory()
+    current_app = device_factory.get_current_app(device_id)
+
+    # Log system prompt (for trace only)
+    if logger:
+        logger.log_system(system_prompt, model_type="claude_backend")
+
+    # First call to ModelInterface
+
+    # Call ModelInterface
+    try:
+        result = model_interface.call_model(
+            context=context,
+            screenshot_base64=base64_img,
+            current_app_name=current_app,
+            user_prompt=claude_context
         )
     except Exception as e:
         if verbose:
@@ -1069,6 +1295,22 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
+def show_results(result: dict):
+    if isinstance(result, dict):
+        print(f"\nStatus: {result.get('status', 'unknown')}")
+        if result.get('message'):
+            print(f"Message: {result.get('message')}")
+        if result.get('conversation_id'):
+            print(f"Conversation ID: {result.get('conversation_id')}")
+        if result.get('log_dir'):
+            print(f"Log directory: {result.get('log_dir')}")
+        if result.get('judge_result'):
+            print(f"Judge result: {result.get('judge_result')}")
+        print()
+    else:
+        print(f"\nResult: {result}\n")
+
+
 
 def main():
     """Main entry point."""
@@ -1209,11 +1451,153 @@ def main():
     # Run with provided task or enter interactive mode
     if args.task:
         print(f"\nTask: {args.task}\n")
+        
+        # Initialize logger (trace logging is enabled by default)
+        # logger = None
+        # if not args.disable_trace:
+        #     trace_root = args.trace_root if hasattr(args, 'trace_root') and args.trace_root else "./traces"
+        #     logger = SimpleTraceLogger(trace_root)
+        
+        ##################################################单元测试
+        # if args.claude_backend:
+        #     # Use Claude backend (ModelInterface)
+        #     result = run_task_with_claude_backend(
+        #         task=args.task,
+        #         action_handler=action_handler,
+        #         max_steps=args.max_steps,
+        #         device_id=args.device_id,
+        #         system_prompt=system_prompt,
+        #         verbose=not args.quiet,
+        #         lang=args.lang,
+        #         api_key=args.claude_api_key,
+        #         api_url=args.claude_api_url,
+        #         model=args.claude_model,
+        #         target_width=args.claude_target_width,
+        #         logger=logger,
+        #         test_mode=args.test,
+        #     )
+        # else:
+        #     # Use local service
+        #     result = run_task_with_service(
+        #         task=args.task,
+        #         service=service,
+        #         action_handler=action_handler,
+        #         max_steps=args.max_steps,
+        #         device_id=args.device_id,
+        #         system_prompt=system_prompt,
+        #         verbose=not args.quiet,
+        #         lang=args.lang,
+        #         logger=logger,
+        #         test_mode=args.test,
+        #         enable_judge=args.enable_judge,
+        #         judge_interval=args.judge_interval,
+        #         judge_k_images=args.judge_k_images,
+        #         judge_target_width=args.judge_target_width,
+        #     )
+        ##################################################单元测试
+        # logger = None
+        # if not args.disable_trace:
+        #     trace_root = args.trace_root if hasattr(args, 'trace_root') and args.trace_root else "./traces"
+        #     logger = SimpleTraceLogger(trace_root)
+        # result = run_task_with_service(
+        #         task=args.task,
+        #         service=service,
+        #         action_handler=action_handler,
+        #         max_steps=args.max_steps,
+        #         device_id=args.device_id,
+        #         system_prompt=system_prompt,
+        #         verbose=not args.quiet,
+        #         lang=args.lang,
+        #         logger=logger,
+        #         test_mode=args.test,
+        #         enable_judge=True,
+        #         judge_interval=args.judge_interval,
+        #         judge_k_images=args.judge_k_images,
+        #         judge_target_width=args.judge_target_width,
+        #     )
+        # print(f'result: {result}')
+        # status = result.get('status')
+        # takeover_triggered = False
+        # if status == 'completed':
+        #     print(f'Task completed')
+        # elif status == 'max_steps_reached':
+        #     print(f'Max steps reached')
+        # elif status == 'model_error':
+        #     print(f'Model error')
+        # elif status == 'interrupted_by_judge':
+        #     print( f'*' * 100)
+        #     print(f'Interrupted by judge, takeover by claude')
+        #     takeover_triggered = True
+        #     print(f'*' * 100)
+        # ############
+        # print(f'logger.trace_root: {logger.trace_root}')
+        # print(f'logger.task_id: {logger.task_id}')
+        # print(f'logger.task_dir: {logger.task_dir}')
+        # print(f'logger.trace_file: {logger.trace_file}')
+        # print(f'logger.step_count: {logger.step_count}')
+        # exit()
+        logger = SimpleTraceLogger(
+            trace_root='traces',
+            task_id='20260107_112701',
+            task_dir='traces/20260107_112701',
+            trace_file='traces/20260107_112701/trace.jsonl',
+            step_count=5,
+        )
 
-        if args.claude_backend:
-            # Use Claude backend (ModelInterface)
-            result = run_task_with_claude_backend(
+        # conversation_history = read_trace_and_organize_messages(
+        #             trace_file=logger.trace_file,
+        #             task_dir=logger.task_dir,
+        #             k_images=judge_k_images,
+        #             target_width=judge_target_width
+        #         )
+        takeover_triggered = True
+        ########### claude接管 ########################
+        if takeover_triggered:
+            # Initialize logger for claude backend (use claude_bac∂kend_traces as default)
+            claude_logger = logger
+            # 读取trace文件，组织claude_context
+            conversation_history = read_trace_and_organize_messages(
+                    trace_file=logger.trace_file,
+                    task_dir=logger.task_dir,
+                    k_images=20,
+                    target_width=args.claude_target_width
+                )
+            claude_context = [
+                {
+                    "type": "text",
+                    "text": f"以下为之前执行的上下文"
+                }
+            ]
+            step_count = 0
+            for message in conversation_history:
+                role = message.get('role')
+                content = message.get('content')
+                if type(content) == str:
+                    claude_context.append({
+                        "type": "text",
+                        "text": f'<{role}>, step {step_count}: {content}'
+                    })
+                elif type(content) == list:
+                    for item in content:
+                        if item['type'] == 'text':
+                            claude_context.append({
+                                "type": "text",
+                                "text": f'<{role}>, step {step_count}: {item['text']}'
+                            })
+                        elif item['type'] == 'image_url':
+                            raw_image_content = item['image_url']['url']
+                            base64_image = raw_image_content[len('data:image/png;base64,'):]
+                            claude_context.append({
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": base64_image}
+                            })
+                else:
+                    raise ValueError(f"Invalid content type: {type(content)}")
+                step_count += 1
+            
+            result = take_over_with_claude_backend(
                 task=args.task,
+                claude_context=claude_context,
                 action_handler=action_handler,
                 max_steps=args.max_steps,
                 device_id=args.device_id,
@@ -1224,41 +1608,12 @@ def main():
                 api_url=args.claude_api_url,
                 model=args.claude_model,
                 target_width=args.claude_target_width,
-                enable_trace=not args.disable_trace,
-                trace_root=args.trace_root,
+                logger=claude_logger,
                 test_mode=args.test,
             )
-        else:
-            # Use local service
-            result = run_task_with_service(
-                task=args.task,
-                service=service,
-                action_handler=action_handler,
-                max_steps=args.max_steps,
-                device_id=args.device_id,
-                system_prompt=system_prompt,
-                verbose=not args.quiet,
-                lang=args.lang,
-                enable_trace=not args.disable_trace,
-                trace_root=args.trace_root,
-                test_mode=args.test,
-                enable_judge=args.enable_judge,
-                judge_interval=args.judge_interval,
-                judge_k_images=args.judge_k_images,
-                judge_target_width=args.judge_target_width,
-            )
-        if isinstance(result, dict):
-            print(f"\nStatus: {result.get('status', 'unknown')}")
-            if result.get('message'):
-                print(f"Message: {result.get('message')}")
-            if result.get('conversation_id'):
-                print(f"Conversation ID: {result.get('conversation_id')}")
-            if result.get('log_dir'):
-                print(f"Log directory: {result.get('log_dir')}")
-            if result.get('judge_result'):
-                print(f"Judge result: {result.get('judge_result')}")
-        else:
-            print(f"\nResult: {result}")
+        
+
+        show_results(result)
     else:
         # Interactive mode
         print("\nEntering interactive mode. Type 'quit' to exit.\n")
@@ -1275,6 +1630,16 @@ def main():
                     continue
 
                 print()
+                
+                # Initialize logger for interactive mode
+                interactive_logger = None
+                if not args.disable_trace:
+                    if args.claude_backend:
+                        trace_root = args.trace_root if hasattr(args, 'trace_root') and args.trace_root else "./claude_backend_traces"
+                    else:
+                        trace_root = args.trace_root if hasattr(args, 'trace_root') and args.trace_root else "./traces"
+                    interactive_logger = SimpleTraceLogger(trace_root)
+                
                 if args.claude_backend:
                     # Use Claude backend (ModelInterface)
                     result = run_task_with_claude_backend(
@@ -1289,8 +1654,7 @@ def main():
                         api_url=args.claude_api_url,
                         model=args.claude_model,
                         target_width=args.claude_target_width,
-                        enable_trace=not args.disable_trace,
-                        trace_root=args.trace_root,
+                        logger=interactive_logger,
                         test_mode=args.test,
                     )
                 else:
@@ -1304,14 +1668,14 @@ def main():
                         system_prompt=system_prompt,
                         verbose=not args.quiet,
                         lang=args.lang,
-                        enable_trace=not args.disable_trace,
-                        trace_root=args.trace_root,
+                        logger=interactive_logger,
                         test_mode=args.test,
                         enable_judge=args.enable_judge,
                         judge_interval=args.judge_interval,
                         judge_k_images=args.judge_k_images,
                         judge_target_width=args.judge_target_width,
                     )
+                
                 if isinstance(result, dict):
                     print(f"\nStatus: {result.get('status', 'unknown')}")
                     if result.get('message'):

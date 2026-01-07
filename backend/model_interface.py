@@ -225,7 +225,7 @@ class ModelInterface:
         context: List[Dict[str, Any]],
         screenshot_base64: Optional[str] = None,
         current_app_name: str = "",
-        user_prompt: str = ""
+        user_prompt = ""
     ) -> Dict[str, Any]:
         """
         Call Claude API and return parsed response.
@@ -315,7 +315,12 @@ class ModelInterface:
 
                 # Add user prompt if provided
                 if user_prompt:
-                    message_content.append({"type": "text", "text": user_prompt})
+                    if type(user_prompt) == str:
+                        message_content.append({"type": "text", "text": user_prompt})
+                    elif type(user_prompt) == list:
+                        message_content.extend(user_prompt)
+                    else:
+                        raise ValueError(f"Invalid user prompt type: {type(user_prompt)}")
 
                 # Add screenshot if provided
                 if screenshot_base64:
@@ -414,6 +419,14 @@ class ModelInterface:
             #     print(f'load_from {tst_data_file}')
             # print(f'url: {self.url}')
             # print('%' * 100)
+            # with open('./_call_api_data.json', 'wt+', encoding='utf-8') as f:
+            #     json.dump(
+            #         {'headers': headers, 'json': data},
+            #         f,
+            #         ensure_ascii=False,
+            #         indent=2
+            #     )
+            #     print(f'save to ./_call_api_data.json')
 
             ########################
             response = requests.post(
@@ -433,7 +446,6 @@ class ModelInterface:
         #     }, f, ensure_ascii=False, indent=2)
         ########################
         response_json = response.json()
-        print(f'response: {response_json}')
 
         response.raise_for_status()  # Raise exception for HTTP errors
         return response_json

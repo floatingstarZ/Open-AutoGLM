@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Service-based Phone Agent CLI.
+Phone Agent CLI with Takeover Support.
 
-This version uses AgentService for inference while maintaining
-full control over the execution loop and message history.
+This version implements a two-phase execution system:
+- Phase 1: Service-based inference with judge monitoring
+- Phase 2: Claude backend takeover when judge detects failure
 
-Key differences from main.py:
+Key features:
 - Manages messages list externally
 - Handles screenshot capture and base64 conversion
-- Controls execution loop with service calls
+- Judge evaluation with automatic takeover
+- Seamless handoff to Claude backend
+- Unified trace logging in relative coordinates
 - Supports K-image filtering for token optimization
 """
 
@@ -46,12 +49,14 @@ from main import (
 class SimpleTraceLogger:
     """简单的实时日志记录器"""
 
-    def __init__(self, trace_root="./traces"):
+    def __init__(self, trace_root="./traces", debug=False):
         self.trace_root = Path(trace_root)
         self.task_id = None
         self.task_dir = None
         self.trace_file = None
         self.step_count = 0
+        self.debug = debug
+        self.debug_dir = None
 
     def start_task(self, task, k_images, max_steps):
         """开始任务，创建目录和文件"""
@@ -60,6 +65,12 @@ class SimpleTraceLogger:
         self.task_dir.mkdir(parents=True, exist_ok=True)
         self.trace_file = self.task_dir / "trace.jsonl"
         self.step_count = 0
+
+        # Create debug directory if debug mode is enabled
+        if self.debug:
+            self.debug_dir = self.task_dir / "debug"
+            self.debug_dir.mkdir(exist_ok=True)
+            print(f"🐛 Debug mode enabled: {self.debug_dir}")
 
         # 写入第1行：task_start
         self._append(
@@ -70,11 +81,22 @@ class SimpleTraceLogger:
                 "trace_dir": str(self.task_dir.absolute()),
                 "k_images": k_images,
                 "max_steps": max_steps,
+                "debug": self.debug,
                 "timestamp": datetime.now().isoformat(),
             }
         )
 
         return self.task_dir
+
+    def save_debug(self, filename: str, data: dict[str, Any]):
+        """Save debug data to file"""
+        if not self.debug or not self.debug_dir:
+            return
+
+        debug_file = self.debug_dir / filename
+        with open(debug_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"🐛 Debug saved: {debug_file.name}")
 
     def log_system(self, system_prompt):
         """记录 system message（第2行）"""
@@ -114,6 +136,18 @@ class SimpleTraceLogger:
             {
                 "type": "judge_result",
                 "step": self.step_count,
+                "judge_result": judge_result,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+    def log_takeover(self, step: int, judge_result: dict[str, Any]):
+        """记录 takeover 事件"""
+        self._append(
+            {
+                "type": "takeover",
+                "step": step,
+                "reason": "judge_failed",
                 "judge_result": judge_result,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -357,7 +391,293 @@ def save_final_messages(messages: list[dict[str, Any]], trace_dir: Path) -> None
         print(f"💾 Test mode: Final messages saved to {final_file}")
 
 
-def run_task_with_service(
+def _continue_with_takeover(
+    logger, takeover_step, judge_result, device_id, action_handler,
+    system_prompt, verbose, lang, max_steps, takeover_k_images,
+    takeover_target_width, claude_api_key, claude_api_url, claude_model
+):
+    """Continue execution with Claude backend after takeover."""
+
+    # Perform handoff
+    model_interface, claude_context, img_width, img_height = _perform_takeover_handoff(
+        logger, takeover_step, judge_result, system_prompt, verbose,
+        takeover_k_images, takeover_target_width,
+        claude_api_key, claude_api_url, claude_model
+    )
+    if logger:
+        logger.save_debug(
+            f"takeover_step{takeover_step}_01_model_interface.json",
+            {
+                "claude_context": claude_context,
+                "img_width": img_width,
+                "img_height": img_height,
+            }
+        )
+        exit()
+
+    step_count = takeover_step
+    device_factory = get_device_factory()
+    msgs = get_messages(lang)
+
+    # Main loop - Phase 2
+    while step_count < max_steps:
+        step_count += 1
+
+        if verbose:
+            print(f"\n{'='*50}")
+            print(f"Step {step_count}/{max_steps} [CLAUDE TAKEOVER]")
+            print(f"{'='*50}")
+
+        # Get current screenshot
+        base64_img, width, height = screenshot_to_base64(device_id)
+        current_app = device_factory.get_current_app(device_id)
+        screen_info = MessageBuilder.build_screen_info(current_app)
+
+        # First step after takeover needs current screenshot
+        # Subsequent steps use standard screen info
+        user_prompt = "" if step_count == takeover_step + 1 else f"** Screen Info **\n\n{screen_info}"
+
+        # Call Claude
+        try:
+            result = model_interface.call_model(
+                context=claude_context,
+                screenshot_base64=base64_img,
+                current_app_name=current_app,
+                user_prompt=user_prompt
+            )
+        except Exception as e:
+            if logger:
+                logger.end_task("takeover_error", f"Claude API error: {e}", step_count)
+            return {
+                "status": "takeover_error",
+                "message": f"Claude API error: {e}",
+                "takeover_triggered": True,
+                "takeover_step": takeover_step,
+                "log_dir": str(logger.task_dir.absolute())
+            }
+
+        response = result["response"]  # Absolute coordinates
+        thinking = result.get("thinking", "")
+
+        # Debug: Save Claude API response
+        if logger:
+            logger.save_debug(
+                f"claude_step{step_count}_response.json",
+                {
+                    "step": step_count,
+                    "user_prompt": user_prompt,
+                    "screen_info": screen_info,
+                    "response": response,
+                    "thinking": thinking,
+                    "full_result": result,
+                }
+            )
+
+        if verbose:
+            print(f"\n💭 {msgs['thinking']}:")
+            print(thinking)
+            print(f"\n🎯 {msgs['action']}:")
+            print(json.dumps(response, ensure_ascii=False, indent=2))
+
+        # Convert Claude output to current format for logging
+        from judge_tools.convert_format import current_absolute_to_relative
+
+        assistant_content_absolute = (
+            f"<think>{thinking}</think>"
+            f"<answer>{json.dumps(response, ensure_ascii=False)}</answer>"
+        )
+
+        assistant_msg = {"role": "assistant", "content": assistant_content_absolute}
+        converted_messages = current_absolute_to_relative(
+            messages=[assistant_msg],
+            image_scale=[width, height]
+        )
+        assistant_content_relative = converted_messages[0]["content"]
+
+        # Debug: Save coordinate conversion
+        if logger:
+            logger.save_debug(
+                f"claude_step{step_count}_coordinate_conversion.json",
+                {
+                    "step": step_count,
+                    "screen_size": [width, height],
+                    "absolute_content": assistant_content_absolute,
+                    "relative_content": assistant_content_relative,
+                }
+            )
+
+        if logger:
+            logger.log_assistant(assistant_content_relative)
+
+        # Check if finish
+        if response.get("_metadata") == "finish":
+            final_message = response.get("message", msgs.get("done", "Task completed"))
+            if logger:
+                logger.end_task("takeover_completed", final_message, step_count)
+            return {
+                "status": "takeover_completed",
+                "message": final_message,
+                "takeover_triggered": True,
+                "takeover_step": takeover_step,
+                "log_dir": str(logger.task_dir.absolute())
+            }
+
+        # Execute action (convert absolute → relative for ActionHandler)
+        action = convert_absolute_to_relative(response, width, height)
+        try:
+            action_result = action_handler.execute(action, width, height)
+        except Exception as e:
+            if verbose:
+                print(f"Action execution error: {e}")
+
+        if action_result.should_finish:
+            final_message = action_result.message or msgs.get("done", "Task completed")
+            if logger:
+                logger.end_task("takeover_completed", final_message, step_count)
+            return {
+                "status": "takeover_completed",
+                "message": final_message,
+                "takeover_triggered": True,
+                "takeover_step": takeover_step,
+                "log_dir": str(logger.task_dir.absolute())
+            }
+
+        # Capture new screenshot
+        base64_img, width, height = screenshot_to_base64(device_id)
+        current_app = device_factory.get_current_app(device_id)
+        screen_info = MessageBuilder.build_screen_info(current_app)
+        text_content = f"** Screen Info **\n\n{screen_info}"
+
+        if logger:
+            logger.log_user(text_content, base64_img)
+
+    # Max steps reached
+    if logger:
+        logger.end_task("max_steps_reached", "Max steps reached after takeover", step_count)
+    return {
+        "status": "max_steps_reached",
+        "message": "Max steps reached after takeover",
+        "takeover_triggered": True,
+        "takeover_step": takeover_step,
+        "log_dir": str(logger.task_dir.absolute())
+    }
+
+
+def _perform_takeover_handoff(
+    logger: SimpleTraceLogger,
+    takeover_step: int,
+    judge_result: dict[str, Any],
+    system_prompt: str,
+    verbose: bool,
+    takeover_k_images: int,
+    takeover_target_width: int,
+    claude_api_key: str,
+    claude_api_url: str,
+    claude_model: str,
+) -> tuple[Any, list[dict[str, Any]], int, int]:
+    """
+    Perform handoff from service to Claude backend.
+    Returns: (model_interface, claude_context, image_width, image_height)
+    """
+    # 1. Log takeover event
+    logger.log_takeover(takeover_step, judge_result)
+
+    if verbose:
+        print(f"\n🔄 TAKEOVER INITIATED at step {takeover_step}")
+        print(f"   Judge verdict: False")
+        print(f"   Reason: {judge_result.get('repair', 'Agent went off track')}")
+
+    # 2. Load trace history with last K screenshots
+    # Use the same function as judge evaluation
+    conversation_history = read_trace_and_organize_messages(
+        trace_file=logger.trace_file,
+        task_dir=logger.task_dir,
+        k_images=takeover_k_images,
+        target_width=takeover_target_width
+    )
+
+    if not conversation_history:
+        raise ValueError("Failed to load conversation history from trace file")
+
+    # Debug: Save loaded conversation history
+    logger.save_debug(
+        f"takeover_step{takeover_step}_01_conversation_history.json",
+        {
+            "takeover_step": takeover_step,
+            "num_messages": len(conversation_history),
+            "conversation_history": conversation_history,
+        }
+    )
+
+    # 3. Determine image scale from loaded messages
+    # The images are resized with short edge = target_width, maintaining aspect ratio
+    # Try to extract actual dimensions from the first image if possible
+    image_scale = [takeover_target_width, takeover_target_width]  # Default to square
+
+    # Attempt to extract actual dimensions from base64 images
+    for msg in conversation_history:
+        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+            for content_item in msg.get("content", []):
+                if content_item.get("type") == "image_url":
+                    # Image found, try to get dimensions
+                    # For now, we'll use the default square assumption
+                    # TODO: Extract actual dimensions from base64 data if needed
+                    break
+
+    if verbose:
+        print(f"   Using image scale: {image_scale}")
+
+    # 4. Convert to Claude format (relative → absolute coordinates)
+    from judge_tools.convert_format import current_to_claude
+
+    claude_messages = current_to_claude(
+        messages=conversation_history,
+        image_scale=image_scale
+    )
+
+    # Debug: Save Claude format messages
+    logger.save_debug(
+        f"takeover_step{takeover_step}_02_claude_messages.json",
+        {
+            "takeover_step": takeover_step,
+            "image_scale": image_scale,
+            "num_messages": len(claude_messages),
+            "claude_messages": claude_messages,
+        }
+    )
+
+    # 5. Initialize ModelInterface
+    from backend.model_interface import ModelInterface
+
+    model_interface = ModelInterface(
+        api_key=claude_api_key,
+        api_url=claude_api_url,
+        model=claude_model,
+        target_width=takeover_target_width
+    )
+
+    # 6. Build Claude context (exclude system message)
+    claude_context = [msg for msg in claude_messages if msg.get("role") != "system"]
+
+    # Debug: Save Claude context
+    logger.save_debug(
+        f"takeover_step{takeover_step}_03_claude_context.json",
+        {
+            "takeover_step": takeover_step,
+            "num_context_messages": len(claude_context),
+            "claude_context": claude_context,
+        }
+    )
+
+    if verbose:
+        print(f"   Loaded {len(conversation_history)} messages → {len(claude_context)} Claude messages")
+        print(f"   Image scale: {image_scale}")
+        print(f"   Starting Phase 2 with Claude backend\n")
+
+    return model_interface, claude_context, image_scale[0], image_scale[1]
+
+
+def run_task_with_takeover(
     task: str,
     service: AgentService,
     action_handler: ActionHandler,
@@ -369,13 +689,22 @@ def run_task_with_service(
     enable_trace: bool = True,
     trace_root: str = "./traces",
     test_mode: bool = False,
-    enable_judge: bool = False,
+    debug: bool = False,
+    # Judge configuration (enabled by default)
+    enable_judge: bool = True,
     judge_interval: int = 1,
     judge_k_images: int = 3,
     judge_target_width: int | None = None,
+    # Takeover configuration
+    takeover_k_images: int = 5,
+    takeover_target_width: int = 512,
+    # Claude backend configuration
+    claude_api_key: str = None,
+    claude_api_url: str = None,
+    claude_model: str = None,
 ) -> dict[str, Any]:
     """
-    Run a task using the service-based architecture.
+    Run a task with service+judge, takeover with Claude if judge fails.
 
     Args:
         task: User task description
@@ -389,22 +718,28 @@ def run_task_with_service(
         enable_trace: Whether to enable trace logging (default: True)
         trace_root: Root directory for trace logs (default: ./traces)
         test_mode: Whether to save final user+assistant messages (default: False)
-        enable_judge: Whether to enable judge evaluation (default: False)
+        enable_judge: Whether to enable judge evaluation (default: True)
         judge_interval: Judge evaluation interval in steps (default: 1, judge every step)
         judge_k_images: Number of recent images to load for judge evaluation (default: 3)
         judge_target_width: Target width for short edge of images in judge evaluation, maintains aspect ratio (optional)
+        takeover_k_images: Number of screenshots to pass to Claude during takeover (default: 5)
+        takeover_target_width: Target width for screenshot resizing in takeover (default: 512)
+        claude_api_key: Claude API key (default: None)
+        claude_api_url: Claude API URL (default: None)
+        claude_model: Claude model name (default: None)
 
     Returns:
         Dictionary with keys:
-        - status: Status string ("completed", "max_steps_reached", "model_error", "interrupted_by_judge")
+        - status: Status string ("completed", "takeover_completed", "max_steps_reached", "model_error", "takeover_error")
         - message: Result message (if applicable)
-        - judge_result: Judge result dictionary (if interrupted by judge)
+        - takeover_triggered: bool (whether takeover occurred)
+        - takeover_step: int (step number where takeover occurred, if applicable)
         - log_dir: Path to log directory (if trace logging enabled)
     """
     # Initialize trace logger
     logger = None
     if enable_trace:
-        logger = SimpleTraceLogger(trace_root)
+        logger = SimpleTraceLogger(trace_root, debug=debug)
         trace_dir = logger.start_task(
             task, service.inference_config.k_images, max_steps
         )
@@ -436,8 +771,11 @@ def run_task_with_service(
     # Execute loop
     step_count = 0
     msgs = get_messages(lang)
+    takeover_triggered = False
+    takeover_step = None
+    judge_result = None
 
-    while step_count < max_steps:
+    while step_count < max_steps and not takeover_triggered:
         step_count += 1
         
 
@@ -469,6 +807,7 @@ def run_task_with_service(
             return {
                 "status": "model_error",
                 "message": error_message,
+                "takeover_triggered": False,
                 "log_dir": str(logger.task_dir.absolute()) if logger else None
             }
 
@@ -516,12 +855,14 @@ def run_task_with_service(
                     print(f"[WARNING] Judge evaluation failed: {e}")
                 import traceback
                 traceback.print_exc()
-            if judge_result.get('verdict') == False:
-                return {
-                    "status": "interrupted_by_judge",
-                    "judge_result": judge_result,
-                    "log_dir": str(logger.task_dir.absolute()) if logger else None
-                }
+            # Check verdict - TRIGGER TAKEOVER if False
+            # if judge_result.get('verdict') == False:
+            #     takeover_triggered = True
+            #     takeover_step = step_count
+            #     break  # Exit Phase 1 loop to start Phase 2
+            takeover_triggered = True
+            takeover_step = step_count
+            break  # Exit Phase 1 loop to start Phase 2
         ######################## judge ########################
 
 
@@ -541,6 +882,7 @@ def run_task_with_service(
             return {
                 "status": "completed",
                 "message": final_message,
+                "takeover_triggered": False,
                 "log_dir": str(logger.task_dir.absolute()) if logger else None
             }
 
@@ -566,6 +908,7 @@ def run_task_with_service(
             return {
                 "status": "completed",
                 "message": final_message,
+                "takeover_triggered": False,
                 "log_dir": str(logger.task_dir.absolute()) if logger else None
             }
 
@@ -583,6 +926,14 @@ def run_task_with_service(
         if logger:
             logger.log_user(text_content, base64_img)
 
+    # Check if takeover was triggered
+    if takeover_triggered:
+        return _continue_with_takeover(
+            logger, takeover_step, judge_result, device_id, action_handler,
+            system_prompt, verbose, lang, max_steps, takeover_k_images,
+            takeover_target_width, claude_api_key, claude_api_url, claude_model
+        )
+
     # Max steps reached
     if logger:
         logger.end_task("max_steps_reached", "Max steps reached", step_count)
@@ -591,6 +942,7 @@ def run_task_with_service(
     return {
         "status": "max_steps_reached",
         "message": "Max steps reached",
+        "takeover_triggered": False,
         "log_dir": str(logger.task_dir.absolute()) if logger else None
     }
 
@@ -993,12 +1345,29 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Target width for short edge of images in judge evaluation, maintains aspect ratio (optional)",
     )
+    parser.add_argument(
+        "--takeover-k-images",
+        type=int,
+        default=5,
+        help="Number of screenshots to pass to Claude during takeover (default: 5)",
+    )
+    parser.add_argument(
+        "--takeover-target-width",
+        type=int,
+        default=512,
+        help="Target width for screenshot resizing in takeover (default: 512)",
+    )
     parser.add_argument("--disable-trace", action="store_true")
     parser.add_argument("--trace-root", type=str)
     parser.add_argument(
         "--test",
         action="store_true",
         help="Enable test mode: save final user+assistant messages to trace directory",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode: save intermediate data at each step for debugging and reproduction",
     )
     parser.add_argument(
         "--claude-backend",
@@ -1052,6 +1421,8 @@ def parse_args() -> argparse.Namespace:
     args.judge_interval = custom_args.judge_interval
     args.judge_k_images = custom_args.judge_k_images
     args.judge_target_width = custom_args.judge_target_width
+    args.takeover_k_images = custom_args.takeover_k_images
+    args.takeover_target_width = custom_args.takeover_target_width
     if custom_args.disable_trace:
         args.disable_trace = True
     elif not hasattr(args, "disable_trace"):
@@ -1061,6 +1432,7 @@ def parse_args() -> argparse.Namespace:
     elif not hasattr(args, "trace_root"):
         args.trace_root = os.getenv("PHONE_AGENT_TRACE_ROOT", "./traces")
     args.test = custom_args.test
+    args.debug = custom_args.debug
     args.claude_backend = custom_args.claude_backend
     args.claude_api_key = custom_args.claude_api_key
     args.claude_api_url = custom_args.claude_api_url
@@ -1229,8 +1601,8 @@ def main():
                 test_mode=args.test,
             )
         else:
-            # Use local service
-            result = run_task_with_service(
+            # Use local service with takeover capability
+            result = run_task_with_takeover(
                 task=args.task,
                 service=service,
                 action_handler=action_handler,
@@ -1242,10 +1614,16 @@ def main():
                 enable_trace=not args.disable_trace,
                 trace_root=args.trace_root,
                 test_mode=args.test,
+                debug=args.debug,
                 enable_judge=args.enable_judge,
                 judge_interval=args.judge_interval,
                 judge_k_images=args.judge_k_images,
                 judge_target_width=args.judge_target_width,
+                takeover_k_images=args.takeover_k_images,
+                takeover_target_width=args.takeover_target_width,
+                claude_api_key=args.claude_api_key,
+                claude_api_url=args.claude_api_url,
+                claude_model=args.claude_model,
             )
         if isinstance(result, dict):
             print(f"\nStatus: {result.get('status', 'unknown')}")
@@ -1253,10 +1631,10 @@ def main():
                 print(f"Message: {result.get('message')}")
             if result.get('conversation_id'):
                 print(f"Conversation ID: {result.get('conversation_id')}")
+            if result.get('takeover_triggered'):
+                print(f"Takeover triggered: Yes (at step {result.get('takeover_step')})")
             if result.get('log_dir'):
                 print(f"Log directory: {result.get('log_dir')}")
-            if result.get('judge_result'):
-                print(f"Judge result: {result.get('judge_result')}")
         else:
             print(f"\nResult: {result}")
     else:
@@ -1294,8 +1672,8 @@ def main():
                         test_mode=args.test,
                     )
                 else:
-                    # Use local service
-                    result = run_task_with_service(
+                    # Use local service with takeover capability
+                    result = run_task_with_takeover(
                         task=task,
                         service=service,
                         action_handler=action_handler,
@@ -1307,10 +1685,16 @@ def main():
                         enable_trace=not args.disable_trace,
                         trace_root=args.trace_root,
                         test_mode=args.test,
+                        debug=args.debug,
                         enable_judge=args.enable_judge,
                         judge_interval=args.judge_interval,
                         judge_k_images=args.judge_k_images,
                         judge_target_width=args.judge_target_width,
+                        takeover_k_images=args.takeover_k_images,
+                        takeover_target_width=args.takeover_target_width,
+                        claude_api_key=args.claude_api_key,
+                        claude_api_url=args.claude_api_url,
+                        claude_model=args.claude_model,
                     )
                 if isinstance(result, dict):
                     print(f"\nStatus: {result.get('status', 'unknown')}")
@@ -1318,10 +1702,10 @@ def main():
                         print(f"Message: {result.get('message')}")
                     if result.get('conversation_id'):
                         print(f"Conversation ID: {result.get('conversation_id')}")
+                    if result.get('takeover_triggered'):
+                        print(f"Takeover triggered: Yes (at step {result.get('takeover_step')})")
                     if result.get('log_dir'):
                         print(f"Log directory: {result.get('log_dir')}")
-                    if result.get('judge_result'):
-                        print(f"Judge result: {result.get('judge_result')}")
                     print()
                 else:
                     print(f"\nResult: {result}\n")
